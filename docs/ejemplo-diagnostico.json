@@ -1,0 +1,32 @@
+{
+  "alarma": "guardia-app-pagos-errores",
+  "diagnostico": {
+    "severidad": "SEV1",
+    "resumen": "Lambda guardia-app-pagos: 100% errores conexión DB tras cambio config 05:18. Clientes sin procesar pagos.",
+    "causa_raiz": "Despliegue a las 05:18 cambió DB_HOST de 'localhost' a 'db-pagos.prod.internal', causando fallo de resolución DNS y errores 'Device or resource busy'. Versión 5 (05:22) repitió la misma configuración errónea. El 100% de invocaciones fallan desde 05:18 (12/12 errores en 05:18, 11/11 en 05:22).",
+    "evidencia": [
+      "Versión 3 (05:16) usaba DB_HOST=localhost sin errores. Versión 4 (05:18) cambió a db-pagos.prod.internal y los errores iniciaron inmediatamente: 12 errores de 12 invocaciones",
+      "Logs muestran 24 ocurrencias de 'No se pudo resolver db-pagos.prod.internal:5432' y 'Device or resource busy' entre 05:18:13 y 05:22:56",
+      "Alias 'live' apunta a versión 5 que mantiene DB_HOST=db-pagos.prod.internal erróneo. Tasa de error 100% en últimos dos picos de tráfico",
+      "CloudTrail confirma UpdateFunctionConfiguration por andresdfx a las 05:18:04Z y 05:21:01Z coincidiendo con inicio y continuación de errores"
+    ],
+    "confianza": "ALTA",
+    "posible_falsa_alarma": false,
+    "comando_remediacion": "aws lambda update-alias --region us-east-1 --function-name guardia-app-pagos --name live --function-version 3",
+    "comando_verificacion": "aws cloudwatch get-metric-statistics --region us-east-1 --namespace AWS/Lambda --metric-name Errors --dimensions Name=FunctionName,Value=guardia-app-pagos --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S) --end-time $(date -u +%Y-%m-%dT%H:%M:%S) --period 60 --statistics Sum",
+    "riesgo_remediacion": "Rollback a versión 3 con localhost puede fallar si la DB real no está en localhost, pero es mejor que 100% errores actuales.",
+    "escalar_a_humano": true,
+    "notas": "Verificar por qué db-pagos.prod.internal no resuelve (DNS, security groups, VPC config). Investigar si localhost era correcto o si falta configurar VPC/subnets para acceso a RDS. Usuario andresdfx hizo múltiples cambios rápidos sugiriendo troubleshooting activo fallido.",
+    "_valido": true
+  },
+  "bedrock": {
+    "latencia_s": 13.62,
+    "inputTokens": 2270,
+    "outputTokens": 762,
+    "totalTokens": 3032,
+    "cacheReadInputTokens": 0,
+    "cacheWriteInputTokens": 0
+  },
+  "contexto_s": 0.9,
+  "total_s": 14.52
+}

@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Guardia N1 - AIOps event-driven con Amazon Bedrock.
+  CloudWatch Alarm -> EventBridge -> Lambda (recoge contexto) -> Bedrock Claude Sonnet 4.5
+  -> diagnostico JSON (severidad, causa raiz, comando exacto) -> CloudWatch Logs + SNS.
+  Incluye un servicio de demo (app-pagos) con su alarma para provocar un incidente real.
+
+# ═════════════════════════════════════════════════════════════
+# PARAMETROS
+# ═════════════════════════════════════════════════════════════
+Parameters:
+  ProjectName:
+    Type: String
+    Default: guardia
+    AllowedPattern: '^[a-z][a-z0-9-]{2,20}$'
+    Description: Prefijo de todos los recursos. La regla de EventBridge escucha alarmas con este prefijo.
+
+  DeployBucketName:
+    Type: String
+    Description: Bucket donde deploy.sh subio oncall.zip (lo crea el propio script).
+
+  OnCallS3Key:
+    Type: String
+    Default: oncall.zip
+    Description: Clave S3 del ZIP de la Lambda de guardia.
+
+  ModelId:
+    Type: String
+    Default: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    Description: >
+      Cross-region inference profile de Claude Sonnet 4.5 (prefijo us.). Enruta la
+      peticion a us-east-1, us-east-2 o us-west-2 segun capacidad.
+
+  FoundationModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-5-20250929-v1:0
+    Description: ID del modelo base detras del perfil. Lo necesita la politica IAM.
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: (Opcional) Correo que recibe el diagnostico por SNS. Llega un correo de confirmacion.
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+
+  # ═════════════════════════════════════════════════════════════
+  # 1. EL SERVICIO QUE SE VA A ROMPER (solo para la demo)
+  #    Una Lambda "app-pagos" que en cada invocacion resuelve el DNS de
+  #    su base de datos (variable DB_HOST). Con DB_HOST=localhost funciona.
+  #    Con un host que no existe, falla DE VERDAD (no hay un if "modo_fallo").
+  #    Produccion la invoca por el alias "live", como un despliegue real.
+  # ═════════════════════════════════════════════════════════════
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-app-pagos-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-app-pagos'
+      RetentionInDays: 1
+
+  AppFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AppLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-app-pagos'
+      Description: Servicio de pagos de demo (se rompe con un DB_HOST invalido)
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AppRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      Environment:
+        Variables:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+      Code:
+        ZipFile: |
+          import os, socket, json
+          def handler(event, context):
+              host = os.environ["DB_HOST"]
+              port = int(os.environ.get("DB_PORT", "5432"))
+              try:
+                  socket.getaddrinfo(host, port)
+              except OSError as exc:  # en Lambda un host inexistente da Errno 16, no gaierror
+                  print(f"ERROR conexion a base de datos fallida host={host} port={port}: {exc}")
+                  raise RuntimeError(f"No se pudo resolver {host}:{port}") from exc
+              print(f"OK pago procesado db={host}:{port}")
+              return {"statusCode": 200, "body": json.dumps({"pago": "aprobado"})}
+
+  # Version 1 = la buena conocida. El alias "live" es lo que usa produccion.
+  AppVersionV1:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref AppFunction
+      Description: v1 estable (DB_HOST=localhost)
+
+  AppAliasLive:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName: !Ref AppFunction
+      Name: live
+      FunctionVersion: !GetAtt AppVersionV1.Version
+
+  # ═════════════════════════════════════════════════════════════
+  # 2. LA ALARMA (el "pager")
+  #    3 o mas errores en 1 minuto. Periodo de 60 s: las metricas de
+  #    Lambda son de 1 minuto, asi que la alarma reacciona rapido.
+  #    El nombre empieza por ${ProjectName}- : asi la ve EventBridge.
+  # ═════════════════════════════════════════════════════════════
+  AppErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-app-pagos-errores'
+      AlarmDescription: Errores en el servicio de pagos (umbral 3 por minuto)
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AppFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ═════════════════════════════════════════════════════════════
+  # 3. EL CANAL DEL INCIDENTE — SNS
+  # ═════════════════════════════════════════════════════════════
+  IncidentTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-incidentes'
+      DisplayName: Guardia N1
+
+  IncidentEmail:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref IncidentTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ═════════════════════════════════════════════════════════════
+  # 4. EL INGENIERO DE GUARDIA — Lambda + rol de SOLO LECTURA
+  #    Minimo privilegio: puede leer contexto e invocar UN modelo.
+  #    No puede cambiar nada de la infraestructura: propone, no ejecuta.
+  # ═════════════════════════════════════════════════════════════
+  OnCallRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-oncall-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockSoloEsteModelo
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Con un inference profile se autorizan DOS cosas: el perfil y el
+              # modelo base en cada region a la que el perfil puede enrutar.
+              - Sid: InvocarPerfil
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}'
+              - Sid: InvocarModeloBaseViaPerfil
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/${FoundationModelId}'
+                  - !Sub 'arn:aws:bedrock:us-east-2::foundation-model/${FoundationModelId}'
+                  - !Sub 'arn:aws:bedrock:us-west-2::foundation-model/${FoundationModelId}'
+                Condition:
+                  StringLike:
+                    bedrock:InferenceProfileArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}'
+        - PolicyName: LeerContexto
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Alarmas
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-*'
+              - Sid: MetricasNoAdmitenArn
+                Effect: Allow
+                Action: cloudwatch:GetMetricData
+                Resource: '*'
+              - Sid: LogsDelServicio
+                Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*'
+              - Sid: QueCambioEnElServicio
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListAliases
+                  - lambda:ListVersionsByFunction
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-*'
+              - Sid: QuienToco
+                Effect: Allow
+                Action: cloudtrail:LookupEvents
+                Resource: '*'
+        - PolicyName: PublicarIncidente
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref IncidentTopic
+
+  OnCallLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-oncall'
+      RetentionInDays: 1
+
+  OnCallFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: OnCallLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-oncall'
+      Description: Ingeniero DevOps de guardia N1 (Bedrock)
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt OnCallRole.Arn
+      Timeout: 90
+      MemorySize: 256
+      Environment:
+        Variables:
+          MODEL_ID: !Ref ModelId
+          SNS_TOPIC_ARN: !Ref IncidentTopic
+          PROJECT_NAME: !Ref ProjectName
+      Code:
+        S3Bucket: !Ref DeployBucketName
+        S3Key: !Ref OnCallS3Key
+
+  # ═════════════════════════════════════════════════════════════
+  # 5. EL GATILLO — regla de EventBridge
+  #    Cualquier alarma de este proyecto que pase a ALARM despierta
+  #    al ingeniero de guardia. No hay polling: es un sensor, no una ronda.
+  # ═════════════════════════════════════════════════════════════
+  AlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-alarma-a-oncall'
+      Description: Alarmas del proyecto en estado ALARM -> Lambda de guardia
+      State: ENABLED
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: [CloudWatch Alarm State Change]
+        detail:
+          alarmName: [{ prefix: !Sub '${ProjectName}-' }]
+          state:
+            value: [ALARM]
+      Targets:
+        - Id: OnCall
+          Arn: !GetAtt OnCallFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 600
+
+  AlarmRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OnCallFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AlarmRule.Arn
+
+# ═════════════════════════════════════════════════════════════
+# SALIDAS
+# ═════════════════════════════════════════════════════════════
+Outputs:
+  AppFunctionName:
+    Description: Servicio de demo que se va a romper
+    Value: !Ref AppFunction
+  StableVersion:
+    # Lambda NO reinicia la numeracion si recreas una funcion con el mismo nombre:
+    # la "v1" puede ser la 3 o la 7. restaurar.sh lee este valor en vez de suponerlo.
+    Description: Version estable conocida de app-pagos (destino del rollback)
+    Value: !GetAtt AppVersionV1.Version
+  AlarmName:
+    Description: Alarma que dispara al ingeniero de guardia
+    Value: !Ref AppErrorsAlarm
+  OnCallFunctionName:
+    Description: Lambda del ingeniero de guardia N1
+    Value: !Ref OnCallFunction
+  OnCallLogGroup:
+    Description: Donde leer el diagnostico (aws logs tail ... --follow)
+    Value: !Ref OnCallLogGroup
+  IncidentTopicArn:
+    Description: Topic SNS del incidente
+    Value: !Ref IncidentTopic
+  EventRuleName:
+    Description: Regla de EventBridge alarma -> guardia
+    Value: !Ref AlarmRule
