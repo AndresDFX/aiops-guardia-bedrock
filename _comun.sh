@@ -7,6 +7,7 @@ APP="${PROJECT}-app-pagos"
 ONCALL="${PROJECT}-oncall"
 ALARMA="${PROJECT}-app-pagos-errores"
 STATE_FILE=".deploy-state"
+VERSION_FILE=".version-estable"   # lo escriben deploy.sh y terraform apply; lo lee restaurar.sh
 
 # python3 en CloudShell/Linux, python en Windows. Si no hay ninguno, avisamos (no morimos en silencio).
 PY=""

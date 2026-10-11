@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Guardia N1 - AIOps event-driven con Amazon Bedrock.
-  CloudWatch Alarm -> EventBridge -> Lambda (recoge contexto) -> Bedrock Claude Sonnet 4.5
+  CloudWatch Alarm -> EventBridge -> Lambda (recoge contexto) -> Bedrock Claude Sonnet 4.6
   -> diagnostico JSON (severidad, causa raiz, comando exacto) -> CloudWatch Logs + SNS.
   Incluye un servicio de demo (app-pagos) con su alarma para provocar un incidente real.
 
@@ -26,14 +26,14 @@ Parameters:
 
   ModelId:
     Type: String
-    Default: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    Default: us.anthropic.claude-sonnet-4-6
     Description: >
-      Cross-region inference profile de Claude Sonnet 4.5 (prefijo us.). Enruta la
-      peticion a us-east-1, us-east-2 o us-west-2 segun capacidad.
+      Cross-region inference profile de Claude Sonnet 4.6 (prefijo us.). Desde us-east-1
+      enruta la peticion a us-east-1, us-east-2 o us-west-2 segun capacidad.
 
   FoundationModelId:
     Type: String
-    Default: anthropic.claude-sonnet-4-5-20250929-v1:0
+    Default: anthropic.claude-sonnet-4-6
     Description: ID del modelo base detras del perfil. Lo necesita la politica IAM.
 
   NotificationEmail:
@@ -102,19 +102,20 @@ Resources:
               print(f"OK pago procesado db={host}:{port}")
               return {"statusCode": 200, "body": json.dumps({"pago": "aprobado"})}
 
-  # Version 1 = la buena conocida. El alias "live" es lo que usa produccion.
-  AppVersionV1:
+  # Version estable conocida (su numero sale en el Output StableVersion y el ingeniero de
+  # guardia la recibe en STABLE_VERSIONS). El alias "live" es lo que usa produccion.
+  AppVersionEstable:
     Type: AWS::Lambda::Version
     Properties:
       FunctionName: !Ref AppFunction
-      Description: v1 estable (DB_HOST=localhost)
+      Description: estable (DB_HOST=localhost)
 
   AppAliasLive:
     Type: AWS::Lambda::Alias
     Properties:
       FunctionName: !Ref AppFunction
       Name: live
-      FunctionVersion: !GetAtt AppVersionV1.Version
+      FunctionVersion: !GetAtt AppVersionEstable.Version
 
   # ═════════════════════════════════════════════════════════════
   # 2. LA ALARMA (el "pager")
@@ -180,6 +181,9 @@ Resources:
             Statement:
               # Con un inference profile se autorizan DOS cosas: el perfil y el
               # modelo base en cada region a la que el perfil puede enrutar.
+              # Desde us-east-1, el perfil us. de Sonnet 4.6 enruta a estas tres
+              # (comprobado el 10-oct-2026 con aws bedrock get-inference-profile).
+              # deploy.sh lo vuelve a comprobar antes de desplegar.
               - Sid: InvocarPerfil
                 Effect: Allow
                 Action: bedrock:InvokeModel
@@ -198,10 +202,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: Alarmas
-                Effect: Allow
-                Action: cloudwatch:DescribeAlarms
-                Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-*'
+              # Los datos de la alarma llegan en el evento: no hace falta DescribeAlarms.
               - Sid: MetricasNoAdmitenArn
                 Effect: Allow
                 Action: cloudwatch:GetMetricData
@@ -253,6 +254,10 @@ Resources:
           MODEL_ID: !Ref ModelId
           SNS_TOPIC_ARN: !Ref IncidentTopic
           PROJECT_NAME: !Ref ProjectName
+          # La ultima version buena conocida de cada servicio, como la sabe el despliegue (la
+          # del Output StableVersion). El N1 la pone SIEMPRE en su contexto, aunque haya quedado
+          # fuera de las versiones recientes que mira. JSON {"funcion": "version"}.
+          STABLE_VERSIONS: !Sub '{"${AppFunction}": "${AppVersionEstable.Version}"}'
       Code:
         S3Bucket: !Ref DeployBucketName
         S3Key: !Ref OnCallS3Key
@@ -299,9 +304,10 @@ Outputs:
     Value: !Ref AppFunction
   StableVersion:
     # Lambda NO reinicia la numeracion si recreas una funcion con el mismo nombre:
-    # la "v1" puede ser la 3 o la 7. restaurar.sh lee este valor en vez de suponerlo.
+    # la primera version del stack puede ser la 3 o la 7. deploy.sh la guarda en
+    # .version-estable y restaurar.sh la lee de ahi (o de este Output).
     Description: Version estable conocida de app-pagos (destino del rollback)
-    Value: !GetAtt AppVersionV1.Version
+    Value: !GetAtt AppVersionEstable.Version
   AlarmName:
     Description: Alarma que dispara al ingeniero de guardia
     Value: !Ref AppErrorsAlarm

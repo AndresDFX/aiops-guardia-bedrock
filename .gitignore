@@ -1,6 +1,16 @@
 oncall.zip
 .deploy-state
 .ultimo-incidente
+.version-estable
 salidas/
 __pycache__/
 *.pyc
+
+# Terraform (el .terraform.lock.hcl SI se versiona)
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+# ZIPs que genera archive_file en terraform/.build/
+.build/
