@@ -132,4 +132,4 @@ llega 8-10 s después a los logs (en la consola web, de 7 a 22 s). Bedrock tarda
 3,30 por millón de tokens de entrada y 16,50 por millón de salida). Con el código final, 9 de 9 fallos
 reales dieron SEV1 con el rollback exacto a la versión estable.
 
-
+Paso a paso para hacerlo en tu cuenta: la guía del participante, https://docs.google.com/document/d/1IBYyPOUXtjLfahEFQsnwzqiVEjUWGEfe/edit.
