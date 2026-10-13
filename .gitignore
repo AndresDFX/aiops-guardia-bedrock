@@ -8,6 +8,8 @@ __pycache__/
 
 # Terraform (el .terraform.lock.hcl SI se versiona)
 .terraform/
+# Las opciones con las que desplego ./deploy.sh (puede llevar tu correo)
+deploy.auto.tfvars
 *.tfstate
 *.tfstate.*
 .terraform.tfstate.lock.info

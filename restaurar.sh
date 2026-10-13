@@ -3,42 +3,10 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 source ./_comun.sh
-# La version estable sale de la IaC: Lambda no reinicia la numeracion al recrear la funcion.
-# Se busca en este orden:
-#   1. .version-estable, que escriben deploy.sh y terraform apply. Vive en $HOME, asi que
-#      sobrevive a un reinicio de CloudShell aunque Terraform ya no este instalado.
-#   2. El Output StableVersion del stack de CloudFormation.
-#   3. terraform output stable_version (pide Terraform instalado y el init hecho).
-#   4. El mismo output, leido del estado de Terraform con python.
-#   5. La configuracion desplegada del ingeniero de guardia: el despliegue le pasa la estable
-#      en la variable STABLE_VERSIONS. Sirve en una sesion sin el estado ni el archivo (por
-#      ejemplo, si desplegaste desde tu portatil y restauras desde CloudShell).
-es_numero() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-ESTABLE=""; FUENTE=""
-if [ -f "$VERSION_FILE" ]; then
-  ESTABLE=$(tr -d ' \r\n' < "$VERSION_FILE"); FUENTE="$VERSION_FILE"
-fi
-if ! es_numero "$ESTABLE"; then
-  ESTABLE=$(aws cloudformation describe-stacks --stack-name "$STACK" \
-    --query "Stacks[0].Outputs[?OutputKey=='StableVersion'].OutputValue" --output text 2>/dev/null | tr -d '\r')
-  FUENTE="Output StableVersion del stack"
-fi
-TFSTATE="terraform/terraform.tfstate"
-if ! es_numero "$ESTABLE" && [ -d terraform ] && command -v terraform >/dev/null 2>&1; then
-  ESTABLE=$(terraform -chdir=terraform output -raw stable_version 2>/dev/null | tr -d '\r')
-  FUENTE="terraform output"
-fi
-if ! es_numero "$ESTABLE" && [ -f "$TFSTATE" ] && [ -n "$PY" ]; then
-  ESTABLE=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['outputs']['stable_version']['value'])" \
-    "$TFSTATE" 2>/dev/null | tr -d '\r')
-  FUENTE="$TFSTATE"
-fi
-if ! es_numero "$ESTABLE" && [ -n "$PY" ]; then
-  ESTABLE=$(aws lambda get-function-configuration --function-name "$ONCALL" \
-    --query 'Environment.Variables.STABLE_VERSIONS' --output text 2>/dev/null | tr -d '\r' \
-    | "$PY" -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ''))" "$APP" 2>/dev/null | tr -d '\r')
-  FUENTE="la variable STABLE_VERSIONS de la Lambda $ONCALL"
-fi
+# La version estable la sabe el despliegue: Lambda no reinicia la numeracion al recrear la funcion.
+# buscar_version_estable (en _comun.sh) la lee de .version-estable, del stack, del estado de
+# Terraform o de la variable STABLE_VERSIONS del N1, en ese orden. aprobar.sh usa la misma.
+buscar_version_estable
 if ! es_numero "$ESTABLE"; then
   echo "No encontre la version estable: no hay $VERSION_FILE, ni stack $STACK, ni output stable_version de Terraform,"
   echo "ni la variable STABLE_VERSIONS en la Lambda $ONCALL (con la entrada de $APP)."
@@ -78,4 +46,5 @@ if [ "$ESTADO" = "ALARM" ]; then
 else
   echo "  - live apunta a la version estable, responde OK y la alarma esta en $ESTADO."
   echo "    Puedes repetir con ./provocar_fallo.sh o probar la falsa alarma con ./simular_alarma.sh"
+  echo "  - Al terminar, borra todo: ./destroy.sh  (./destroy-cloudformation.sh si desplegaste con CloudFormation)"
 fi

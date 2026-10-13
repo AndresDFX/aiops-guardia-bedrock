@@ -1,51 +1,70 @@
 #!/usr/bin/env bash
-# Borra TODO lo que creo deploy.sh (ruta CloudFormation): stack, bucket de despliegue y estado local.
-# Si desplegaste con Terraform, el que borra es: terraform -chdir=terraform destroy
+# Borra TODA la demo en un solo paso (ruta Terraform, la de ./deploy.sh) y comprueba en la
+# cuenta que no quedo nada. Funciona aunque CloudShell se haya reiniciado: reinstala Terraform,
+# rehace el init y usa lo que vive en $HOME, el estado (terraform/terraform.tfstate) y las
+# opciones del despliegue (terraform/deploy.auto.tfvars). No hace falta repetir WEB=... ni EMAIL=...
+# Uso:  ./destroy.sh      (~3,5 min con la consola web: CloudFront deshabilita la distribucion antes
+#                          de borrarla; ~15 s sin ella)
+# Si desplegaste con CloudFormation (./deploy-cloudformation.sh), el que borra es ./destroy-cloudformation.sh
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 source ./_comun.sh
+SECONDS=0
 
-if aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
-  echo "==> Borrando stack $STACK (Lambdas, versiones, alarma, regla, topic, roles y log groups)"
-  aws cloudformation delete-stack --stack-name "$STACK"
-  if aws cloudformation wait stack-delete-complete --stack-name "$STACK"; then
-    echo "    Stack borrado."
-  else
-    echo "    ERROR: el stack no termino de borrarse. Mira el motivo con:"
-    echo "    aws cloudformation describe-stack-events --stack-name $STACK --max-items 5 --query 'StackEvents[].[LogicalResourceId,ResourceStatus,ResourceStatusReason]' --output table"
+# La demo vive en la region donde se desplego, aunque esta terminal apunte a otra.
+R_DEMO=$(previo region)
+if [ -n "$R_DEMO" ] && [ "$R_DEMO" != "$AWS_REGION" ]; then
+  echo "AVISO: la demo se desplego en $R_DEMO y esta terminal apunta a $AWS_REGION: borro en $R_DEMO."
+  export AWS_REGION="$R_DEMO" AWS_DEFAULT_REGION="$R_DEMO"
+fi
+comprobar_identidad || exit 1
+
+N_TF=$(recursos_en_estado)
+BORRADO=1
+STACK_VIVO=0
+if [ "$N_TF" = "0" ]; then
+  echo "==> $TFSTATE no tiene recursos: nada que borrar con Terraform."
+  if aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
+    STACK_VIVO=1
+    echo "    Pero existe el stack $STACK: la demo se desplego con CloudFormation."
+    echo "    Borrala con: ./destroy-cloudformation.sh"
   fi
 else
-  echo "==> No hay stack $STACK: nada que borrar con CloudFormation."
-fi
-
-BUCKET=""
-if [ -f "$STATE_FILE" ]; then source "$STATE_FILE"; fi
-if [ -n "${BUCKET:-}" ]; then
-  if aws s3 rb "s3://$BUCKET" --force >/dev/null 2>&1; then
-    echo "==> Bucket $BUCKET borrado."
+  echo "==> El estado de Terraform tiene $N_TF recursos: los borro todos"
+  if ! preparar_terraform; then
+    BORRADO=0
   else
-    echo "==> El bucket $BUCKET ya no existia."
+    mkdir -p salidas
+    LOG="salidas/terraform-destroy-$(date +%Y%m%d-%H%M%S).log"
+    echo "==> terraform destroy (detalle completo en $LOG)"
+    if ! terraform_resumido "$LOG" destroy -auto-approve; then
+      BORRADO=0
+      echo "ERROR: terraform destroy no termino. Arriba el error; el detalle esta en $LOG." >&2
+    fi
   fi
 fi
-rm -f "$STATE_FILE" oncall.zip
-
-# Lo que creo Terraform no lo toca este script. Si hay recursos en el estado, se dice claro.
-TF_RECURSOS=0
-if [ -f terraform/terraform.tfstate ] && [ -n "$PY" ]; then
-  TF_RECURSOS=$("$PY" -c "import json,sys; r=json.load(open(sys.argv[1])).get('resources',[]); print(sum(1 for x in r if x.get('mode')=='managed'))" \
-    terraform/terraform.tfstate 2>/dev/null | tr -d '\r')
+# Con el estado vacio ya no hacen falta las opciones del despliegue: el siguiente ./deploy.sh
+# arranca con los valores por defecto. Si la demo vive en CloudFormation, sus archivos se quedan.
+if [ "$STACK_VIVO" -eq 0 ] && [ "$(recursos_en_estado)" = "0" ]; then
+  rm -f "$TFVARS" "$VERSION_FILE" .ultimo-incidente
 fi
-if [ "${TF_RECURSOS:-0}" -gt 0 ] 2>/dev/null; then
-  echo ""
-  echo "OJO: terraform/terraform.tfstate tiene $TF_RECURSOS recursos creados con Terraform."
-  echo "     Este script no los borra. Borralos con: terraform -chdir=terraform destroy"
-  echo "     (en una sesion nueva de CloudShell, primero reinstala Terraform y haz init)"
-  exit 1
-fi
-rm -f "$VERSION_FILE"
 
 echo ""
-echo "QUE MIRAR AHORA (las tres consultas deben salir vacias):"
-echo "  aws lambda list-functions --query 'Functions[?starts_with(FunctionName,\`$PROJECT-\`)].FunctionName' --output text"
-echo "  aws cloudwatch describe-alarms --alarm-name-prefix $PROJECT- --query 'MetricAlarms[].AlarmName' --output text"
-echo "  aws logs describe-log-groups --log-group-name-prefix /aws/lambda/$PROJECT- --query 'logGroups[].logGroupName' --output text"
+verificar_limpieza
+LIMPIO=$?
+echo ""
+printf 'Tiempo total: %d min %02d s\n' $((SECONDS / 60)) $((SECONDS % 60))
+echo ""
+echo "QUE MIRAR AHORA:"
+if [ "$LIMPIO" -eq 0 ] && [ "$BORRADO" -eq 1 ]; then
+  echo "  - Nada: la cuenta quedo sin recursos de la demo y no genera costos. Puedes cerrar CloudShell."
+  echo "  - Para volver a montarla: ./deploy.sh"
+  exit 0
+fi
+if [ "$STACK_VIVO" -eq 1 ]; then
+  echo "  - Lo que queda es la demo de CloudFormation (stack $STACK): borrala con ./destroy-cloudformation.sh"
+  exit 1
+fi
+echo "  - Arriba, lo que QUEDA o el error. Repite ./destroy.sh: Terraform retoma donde quedo."
+echo "  - Si borraste $TFSTATE, Terraform ya no sabe que creo: borra lo que queda desde la consola."
+exit 1

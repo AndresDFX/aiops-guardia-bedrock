@@ -1,111 +1,140 @@
 #!/usr/bin/env bash
-# Despliega Guardia N1 con CloudFormation (la ruta principal es terraform/): empaqueta la
-# Lambda, la sube a S3 y crea el stack.
-# Uso:  ./deploy.sh            (opcional: EMAIL=tu@correo.com ./deploy.sh)
-# El modelo sale de template.yaml (Claude Sonnet 4.6 por el perfil us.). Para usar otro se
-# pasan los DOS parametros, el perfil y su modelo base, con este formato:
+# Crea TODA la demo en un solo paso, con Terraform (la ruta principal). Se puede repetir: si ya
+# esta desplegada no cambia nada y vuelve a imprimir la URL, el PIN y los siguientes pasos.
+#   1. Comprueba la cuenta, la region y que el perfil del modelo exista en esa region.
+#   2. Comprueba que la cuenta pueda usar el modelo. Si el acuerdo de Marketplace no esta
+#      AVAILABLE, hace la primera invocacion con TU usuario (es la que lo activa) y espera.
+#   3. Instala Terraform si falta (CloudShell lo borra al cerrar la sesion).
+#   4. terraform init y apply, con la cache de providers en /tmp.
+#   5. Imprime el resumen: consola web, PIN, version estable y que hacer despues.
+# Uso:  ./deploy.sh
+# Opciones (quedan en terraform/deploy.auto.tfvars: el siguiente deploy y el destroy las respetan):
+#   EMAIL=tu@correo.com ./deploy.sh   el diagnostico llega tambien por correo (SNS)
+#   WEB=false ./deploy.sh             sin consola web: 18 recursos y un destroy de ~15 s
+#   OCULTAR_PIN=1 ./deploy.sh         no muestra el PIN (por si la pantalla esta proyectada)
+#   Otro modelo: los DOS IDs, el perfil y su modelo base, con este formato:
 #   MODEL_ID=us.anthropic.claude-sonnet-4-6 FOUNDATION_MODEL_ID=anthropic.claude-sonnet-4-6 ./deploy.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./_comun.sh
+SECONDS=0
 
-echo "==> Cuenta y region"
-aws sts get-caller-identity --query '[Account,Arn]' --output text
-echo "    Region: $AWS_REGION   Stack: $STACK"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r')
-
-# Modelo: por defecto, los de template.yaml. Se pasan siempre los dos al stack.
-default_de() {
-  aws cloudformation get-template-summary --template-body file://template.yaml \
-    --query "Parameters[?ParameterKey=='$1'].DefaultValue" --output text | tr -d '\r'
+# Valores por defecto: los de terraform/variables.tf, para no repetirlos aqui.
+default_tf() {
+  sed -n "/^variable \"$1\"/,/^}/s/^[[:space:]]*default[[:space:]]*=[[:space:]]*\"\(.*\)\"/\1/p" \
+    terraform/variables.tf | sed -n '1p'
 }
-MODEL_ID="${MODEL_ID:-$(default_de ModelId)}"
-FOUNDATION_MODEL_ID="${FOUNDATION_MODEL_ID:-$(default_de FoundationModelId)}"
+# Cada opcion: la variable si la pasaste; si no, la del despliegue anterior; si no, el valor por defecto.
+WEB_VAL="${WEB-$(previo web_enabled)}"
+WEB_VAL="${WEB_VAL:-true}"
+EMAIL_VAL="${EMAIL-$(previo notification_email)}"
+MODEL_VAL="${MODEL_ID-$(previo model_id)}"
+MODEL_VAL="${MODEL_VAL:-$(default_tf model_id)}"
+FM_VAL="${FOUNDATION_MODEL_ID-$(previo foundation_model_id)}"
+FM_VAL="${FM_VAL:-$(default_tf foundation_model_id)}"
+case "$WEB_VAL" in
+  true|false) ;;
+  *) echo "ERROR: WEB tiene que ser true o false (llego '$WEB_VAL')." >&2; exit 1 ;;
+esac
+case "$EMAIL_VAL" in
+  "") ;;
+  *[!A-Za-z0-9._%+@-]*|*@*@*) echo "ERROR: EMAIL no parece un correo: '$EMAIL_VAL'." >&2; exit 1 ;;
+  ?*@?*.?*) ;;
+  *) echo "ERROR: EMAIL no parece un correo: '$EMAIL_VAL'." >&2; exit 1 ;;
+esac
+for v in "$MODEL_VAL" "$FM_VAL"; do
+  case "$v" in ''|*[!A-Za-z0-9._:-]*) echo "ERROR: ID de modelo no valido: '$v'." >&2; exit 1 ;; esac
+done
 
-# Antes de crear nada: el perfil existe en esta region, usa ese modelo base y solo enruta a
-# regiones que la politica IAM autoriza. Si no, la Lambda daria AccessDenied (a veces si y
-# a veces no) en plena demo. Son las tres de InvocarModeloBaseViaPerfil en template.yaml.
-REGIONES_IAM="us-east-1 us-east-2 us-west-2"
-echo "==> Modelo: $MODEL_ID (modelo base $FOUNDATION_MODEL_ID)"
-if ! ARNS=$(aws bedrock get-inference-profile --inference-profile-identifier "$MODEL_ID" \
-      --query 'models[].modelArn' --output text 2>&1); then
-  echo "ERROR: no pude leer el perfil $MODEL_ID en $AWS_REGION:" >&2
-  echo "$ARNS" | sed '/^[[:space:]]*$/d; s/^/  /' >&2
-  echo "  La demo esta probada en us-east-1: export AWS_REGION=us-east-1" >&2
+# 1. Cuenta, region y perfil
+comprobar_identidad || exit 1
+R_PREVIA=$(previo region)
+if [ -n "$R_PREVIA" ] && [ "$R_PREVIA" != "$AWS_REGION" ] && [ "$(recursos_en_estado)" != "0" ]; then
+  echo "ERROR: la demo ya esta desplegada en $R_PREVIA y esta terminal apunta a $AWS_REGION." >&2
+  echo "QUE MIRAR AHORA:"
+  echo "  - export AWS_REGION=$R_PREVIA y repite ./deploy.sh (o borrala antes con ./destroy.sh)."
   exit 1
 fi
-DESTINOS=""
-for ARN in $(echo "$ARNS" | tr -d '\r'); do
-  R=$(echo "$ARN" | cut -d: -f4)
-  if [ "${ARN##*/}" != "$FOUNDATION_MODEL_ID" ]; then
-    echo "ERROR: el perfil $MODEL_ID no usa el modelo base $FOUNDATION_MODEL_ID ($ARN)." >&2
-    exit 1
-  fi
-  case " $REGIONES_IAM " in
-    *" $R "*) DESTINOS="$DESTINOS $R" ;;
-    *) echo "ERROR: desde $AWS_REGION el perfil enruta tambien a ${R:-una region global}, que la politica IAM no autoriza." >&2
-       echo "  Usa us-east-1 (export AWS_REGION=us-east-1) o agrega esa region en template.yaml." >&2
-       exit 1 ;;
-  esac
-done
-echo "    El perfil enruta a:$DESTINOS. La politica IAM autoriza esas regiones."
-
-# Bucket de despliegue: se crea una vez y se recuerda en .deploy-state (destroy.sh lo borra).
-BUCKET=""
-if [ -f "$STATE_FILE" ]; then source "$STATE_FILE"; fi
-if [ -n "${BUCKET:-}" ] && ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
-  echo "==> El bucket de $STATE_FILE ($BUCKET) ya no existe: creo otro"
-  BUCKET=""
+# Las dos rutas de IaC crean recursos con los mismos nombres: no pueden convivir.
+if aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
+  echo "ERROR: en esta cuenta ya hay una demo desplegada con CloudFormation (stack $STACK)." >&2
+  echo "QUE MIRAR AHORA:"
+  echo "  - Las dos rutas usan los mismos nombres. Borra esa con ./destroy-cloudformation.sh y repite"
+  echo "    ./deploy.sh, o sigue la demo con ella: los demas scripts son los mismos."
+  exit 1
 fi
-if [ -z "${BUCKET:-}" ]; then
-  BUCKET="${PROJECT}-deploy-${ACCOUNT_ID}-$(date +%s)"
-  if [ "$AWS_REGION" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$BUCKET" >/dev/null
-  else
-    # Fuera de us-east-1, S3 exige la region en LocationConstraint.
-    aws s3api create-bucket --bucket "$BUCKET" \
-      --create-bucket-configuration LocationConstraint="$AWS_REGION" >/dev/null
-  fi
-  echo "BUCKET=\"$BUCKET\"" > "$STATE_FILE"
-  echo "==> Bucket creado: $BUCKET"
-else
-  echo "==> Bucket reutilizado: $BUCKET"
+comprobar_perfil "$MODEL_VAL" "$FM_VAL" || exit 1
+
+# 2. Acceso de la cuenta al modelo (acuerdo de Marketplace y cuota)
+comprobar_acceso_modelo "$MODEL_VAL" "$FM_VAL" || exit 1
+
+# 3. Terraform (se instala si falta) y init
+preparar_terraform || exit 1
+
+# 4. Apply. Las opciones van a un .auto.tfvars: Terraform lo lee solo en plan, apply y destroy.
+cat > "$TFVARS" <<EOF
+# Lo escribe ./deploy.sh con las opciones del despliegue. Terraform lo carga solo (*.auto.tfvars)
+# en plan, apply y destroy: ./destroy.sh y un "terraform plan" a mano usan los mismos valores.
+# Esta en .gitignore: puede llevar tu correo.
+region              = "$AWS_REGION"
+project_name        = "$PROJECT"
+web_enabled         = $WEB_VAL
+notification_email  = "$EMAIL_VAL"
+model_id            = "$MODEL_VAL"
+foundation_model_id = "$FM_VAL"
+EOF
+mkdir -p salidas
+LOG="salidas/terraform-apply-$(date +%Y%m%d-%H%M%S).log"
+echo "==> terraform apply (el plan completo queda en $LOG)"
+if ! terraform_resumido "$LOG" apply -auto-approve; then
+  echo "ERROR: terraform apply fallo. Arriba el error; el detalle completo esta en $LOG." >&2
+  echo "QUE MIRAR AHORA:"
+  echo "  - Corrige la causa y repite ./deploy.sh: Terraform retoma donde quedo."
+  echo "  - Para borrar lo que alcanzo a crear: ./destroy.sh"
+  exit 1
 fi
 
-echo "==> Empaquetando lambda_function.py"
-rm -f oncall.zip
-if command -v zip >/dev/null 2>&1; then
-  zip -q oncall.zip lambda_function.py
-else
-  "$PY" -c "import zipfile; z=zipfile.ZipFile('oncall.zip','w',zipfile.ZIP_DEFLATED); z.write('lambda_function.py'); z.close()"
-fi
-# Clave versionada por hash: si el codigo cambia, CloudFormation actualiza la Lambda.
-HASH=$("$PY" -c "import hashlib;print(hashlib.sha1(open('oncall.zip','rb').read()).hexdigest()[:10])" | tr -d '\r')
-KEY="oncall-${HASH}.zip"
-# --only-show-errors y no --quiet: si la subida falla, el error se ve.
-aws s3 cp oncall.zip "s3://${BUCKET}/${KEY}" --only-show-errors
-
-echo "==> Desplegando CloudFormation (2-3 min la primera vez)"
-aws cloudformation deploy \
-  --stack-name "$STACK" \
-  --template-file template.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides ProjectName="$PROJECT" DeployBucketName="$BUCKET" OnCallS3Key="$KEY" \
-    NotificationEmail="${EMAIL:-}" ModelId="$MODEL_ID" FoundationModelId="$FOUNDATION_MODEL_ID" \
-  --no-fail-on-empty-changeset
-
-aws cloudformation describe-stacks --stack-name "$STACK" \
-  --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output table
-# restaurar.sh lee la version estable de este archivo: sobrevive a un reinicio de CloudShell.
-aws cloudformation describe-stacks --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='StableVersion'].OutputValue" --output text \
-  | tr -d '\r' > "$VERSION_FILE"
+# 5. Resumen
+out() { terraform -chdir=terraform output -raw "$1" 2>/dev/null | tr -d '\r' || true; }
+ESTABLE=$(out stable_version)
+URL=$(out web_url)
+# restaurar.sh y aprobar.sh leen la estable de aqui: sobrevive a un reinicio de CloudShell.
+if es_numero "$ESTABLE"; then echo "$ESTABLE" > "$VERSION_FILE"; fi
+ESTADO=$(aws cloudwatch describe-alarms --alarm-names "$ALARMA" \
+  --query 'MetricAlarms[0].StateValue' --output text 2>/dev/null | tr -d '\r' || true)
+[ "$ESTADO" = "INSUFFICIENT_DATA" ] && ESTADO="INSUFFICIENT_DATA, pasa a OK en 1-2 min"
 
 echo ""
-echo "QUE MIRAR AHORA:"
-echo "  1. Estado de la alarma (debe decir OK o INSUFFICIENT_DATA):"
-echo "     aws cloudwatch describe-alarms --alarm-names $ALARMA --query 'MetricAlarms[0].StateValue' --output text"
-echo "  2. En otra terminal, deja corriendo los logs del ingeniero de guardia"
-echo "     (sin las dos lineas JSON largas, que guardan el contexto y el diagnostico):"
-echo "     aws logs tail /aws/lambda/$ONCALL --follow --format short --filter-pattern '-\"CONTEXTO_JSON\" -\"DIAGNOSTICO_JSON\"'"
-echo "  3. Cuando quieras romper produccion: ./provocar_fallo.sh"
+echo "================================================================"
+printf '  GUARDIA N1 LISTA en %s  (%d min %02d s)\n' "$AWS_REGION" $((SECONDS / 60)) $((SECONDS % 60))
+echo "================================================================"
+echo "  Servicio de pagos : $APP, alias live -> v$ESTABLE (la version estable)"
+echo "  Alarma            : $ALARMA ($ESTADO)"
+echo "  Ingeniero N1      : $ONCALL, con $MODEL_VAL y rol de solo lectura"
+if [ "$WEB_VAL" = "true" ]; then
+  HTTP=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$URL/" 2>/dev/null | tr -d '\r' || true)
+  echo "  Consola web       : $URL"
+  if [ "$HTTP" = "200" ]; then
+    echo "                      ya responde."
+  else
+    echo "                      CloudFront tarda 1-2 min en publicarla: si no abre, espera y recarga."
+  fi
+  if [ -n "${OCULTAR_PIN:-}" ]; then
+    echo "  PIN de la web     : ******** (oculto; lo da: terraform -chdir=terraform output -raw web_pin)"
+  else
+    echo "  PIN de la web     : $(out web_pin)   (si lo pierdes, ./deploy.sh lo vuelve a mostrar)"
+  fi
+else
+  echo "  Consola web       : no (WEB=false). WEB=true ./deploy.sh la crea."
+fi
+if [ -n "$EMAIL_VAL" ]; then
+  echo "  Correo            : $EMAIL_VAL (confirma la suscripcion en el correo de AWS Notifications)"
+fi
+echo ""
+PASOS=$(out siguientes_pasos)
+if [ -n "$PASOS" ]; then
+  echo "$PASOS"
+else
+  echo "QUE MIRAR AHORA:"
+  echo "  ./logs.sh en otra columna, ./provocar_fallo.sh, ./ver_diagnostico.sh, ./aprobar.sh y, al final, ./destroy.sh"
+fi

@@ -45,34 +45,36 @@ output "web_url" {
 }
 
 output "web_pin" {
-  description = "PIN de los botones de la consola. Se lee con: terraform -chdir=terraform output -raw web_pin"
+  description = "PIN de los botones de la consola. Lo imprime ./deploy.sh; tambien: terraform -chdir=terraform output -raw web_pin"
   value       = var.web_enabled ? random_password.pin[0].result : ""
   sensitive   = true
 }
 
-# Los ultimos pasos cambian si hay consola web. Van como lista y no como %{if} dentro del
+# Algunos pasos cambian si hay consola web. Van como texto aparte y no como %{if} dentro del
 # heredoc: ahi la sangria de las lineas condicionales no se recorta igual que la del resto.
 locals {
-  pasos_finales = var.web_enabled ? join("\n", [
-    "  4. O hazlo desde la consola web: https://${aws_cloudfront_distribution.web[0].domain_name}",
-    "     CloudFront tarda unos minutos en publicarla: si no abre, espera y recarga.",
-    "     Los botones piden un PIN: terraform -chdir=terraform output -raw web_pin",
-    "  5. Al terminar, borra todo: terraform -chdir=terraform destroy",
-    "     (con la consola tarda unos minutos mas: CloudFront deshabilita la distribucion antes de borrarla)",
-  ]) : "  4. Al terminar, borra todo: terraform -chdir=terraform destroy"
+  paso_web = var.web_enabled ? join("\n", [
+    "  4. O sigue el incidente y aprueba desde la consola web: https://${aws_cloudfront_distribution.web[0].domain_name}",
+    "     CloudFront tarda 1-2 min en publicarla: si no abre, espera y recarga. El PIN lo imprime ./deploy.sh.",
+  ]) : "  4. (Sin consola web. WEB=true ./deploy.sh la crea.)"
+  paso_destroy = var.web_enabled ? join("\n", [
+    "  6. Al terminar, borra todo: ./destroy.sh",
+    "     (~3,5 min: CloudFront deshabilita la distribucion antes de borrarla)",
+  ]) : "  6. Al terminar, borra todo: ./destroy.sh  (~15 s)"
 }
 
 output "siguientes_pasos" {
-  description = "Que mirar ahora (lo mismo que imprime deploy.sh, mas la consola web si web_enabled)"
+  description = "Que mirar ahora: lo imprime ./deploy.sh al final (y terraform apply, si despliegas a mano)"
   value = chomp(<<-EOT
-    QUE MIRAR AHORA:
-      1. Estado de la alarma (debe decir OK o INSUFFICIENT_DATA):
-         aws cloudwatch describe-alarms --alarm-names ${aws_cloudwatch_metric_alarm.errores.alarm_name} --query 'MetricAlarms[0].StateValue' --output text
-      2. En otra terminal, deja corriendo los logs del ingeniero de guardia
-         (sin las dos lineas JSON largas, que guardan el contexto y el diagnostico):
-         aws logs tail ${aws_cloudwatch_log_group.oncall.name} --follow --format short --filter-pattern '-"CONTEXTO_JSON" -"DIAGNOSTICO_JSON"'
-      3. Cuando quieras romper produccion, desde la raiz del repo: ./provocar_fallo.sh
-    ${local.pasos_finales}
+    QUE MIRAR AHORA (desde la carpeta del repo):
+      1. En una segunda columna de CloudShell (Actions -> Tabs layout -> Split into columns),
+         deja corriendo la terminal del ingeniero de guardia: ./logs.sh
+      2. Rompe produccion con un mal despliegue real: ./provocar_fallo.sh
+         La alarma suena en 1-2 min y el diagnostico aparece en la columna de ./logs.sh.
+      3. Leelo con ./ver_diagnostico.sh y, si estas de acuerdo, aprueba el rollback: ./aprobar.sh
+    ${local.paso_web}
+      5. Vuelve al estado sano con ./restaurar.sh. Despues, la falsa alarma: ./simular_alarma.sh
+    ${local.paso_destroy}
   EOT
   )
 }

@@ -4,132 +4,153 @@ Alarma de CloudWatch → EventBridge → Lambda (contexto) → Claude Sonnet 4.6
 → diagnóstico JSON con severidad, causa raíz y comando exacto → CloudWatch Logs + SNS.
 El N1 **no ejecuta** nada: propone, un humano aprueba, en la terminal o en una consola web.
 
-Pensado para **AWS CloudShell en us-east-1** (AWS CLI v2, python3, zip). La ruta principal es
-**Terraform** (`terraform/`); `template.yaml` con `deploy.sh` es la alternativa en CloudFormation.
-Las dos crean los mismos recursos con los mismos nombres y usan los mismos scripts de la demo.
+Pensado para **AWS CloudShell en us-east-1** (AWS CLI v2, python3). Un script crea todo y otro lo
+borra; entre los dos, un script por cada acción de la demo. La infraestructura es **Terraform**
+(`terraform/`); `template.yaml` es la alternativa en CloudFormation, con sus propios scripts.
 
-| Archivo | Qué hace |
-|---|---|
-| `terraform/` | La infraestructura en Terraform: app de demo + alias `live`, alarma, regla, Lambda de guardia, IAM de mínimo privilegio, SNS y, en `web.tf`, la consola web |
-| `web/` y `src-web/control.py` | La consola web: la página (HTML, CSS y JS) y la Lambda de control que atiende sus botones. Solo la ruta Terraform |
-| `template.yaml` | Lo mismo en CloudFormation |
-| `lambda_function.py` | Recoge contexto, llama a Bedrock con el `SYSTEM_PROMPT`, valida el JSON y publica |
-| `provocar_fallo.sh` | Mal despliegue real: `DB_HOST` inválido, nueva versión, alias `live` y 12 peticiones |
-| `ver_diagnostico.sh` | Muestra el último diagnóstico y lo guarda en `salidas/` |
-| `restaurar.sh` | Vuelve a la versión estable (`.version-estable`, Output `StableVersion`, el estado de Terraform o, si no hay ninguno, la variable `STABLE_VERSIONS` del N1), deja `DB_HOST=localhost` y espera a que la alarma vuelva sola a OK |
-| `simular_alarma.sh` | Fuerza la alarma sin errores nuevos: la prueba de falsa alarma. No sirve de plan B con producción rota: el modelo la trata como falsa alarma |
-| `deploy.sh` | Ruta CloudFormation: empaqueta, sube a un bucket temporal y despliega (`EMAIL=... ./deploy.sh` para recibir el correo) |
-| `destroy.sh` | Ruta CloudFormation: borra el stack y el bucket |
-
-## Antes de empezar: el modelo
-
-Por defecto, **Claude Sonnet 4.6** por el perfil `us.anthropic.claude-sonnet-4-6`. La primera
-llamada al modelo hazla tú, no la Lambda: es la que activa el acuerdo de Marketplace de la cuenta.
+## De punta a punta
 
 ```bash
 export AWS_REGION=us-east-1
-aws bedrock-runtime converse --model-id us.anthropic.claude-sonnet-4-6 \
-  --messages '[{"role":"user","content":[{"text":"Responde solo con la palabra: listo"}]}]' \
-  --query 'output.message.content[?text].text | [0]' --output text
-aws bedrock get-foundation-model-availability --model-id anthropic.claude-sonnet-4-6 \
-  --query agreementAvailability.status --output text
-```
-
-El segundo comando debe decir `AVAILABLE` (tardó ~1 min en la cuenta del laboratorio). Si el
-primero responde `AccessDeniedException ... is not available for this account`, mira la cuota del
-modelo en Service Quotas (tokens por minuto): con la cuota en 0, Bedrock da ese error aunque el
-acuerdo esté `AVAILABLE`. Le pasó a Sonnet 5.5 en la cuenta del laboratorio. Sonnet 4.5 está en
-Legacy desde el 8-oct-2026.
-
-## Con Terraform (ruta principal)
-
-Terraform no viene en CloudShell y se borra al cerrar la sesión: se instala en cada sesión.
-
-```bash
-# 1. Instalar Terraform (comandos oficiales de HashiCorp para Amazon Linux, ~1 min)
-sudo yum install -y yum-utils shadow-utils
-sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-sudo yum -y install terraform
-
-# 2. El provider de AWS pesa ~800 MB y $HOME solo tiene 1 GB: la caché va en /tmp
-export TF_PLUGIN_CACHE_DIR=/tmp/terraform-plugins
-mkdir -p "$TF_PLUGIN_CACHE_DIR"
-
-# 3. Desplegar, romper, diagnosticar, restaurar y borrar (desde la raíz del repo)
+git clone https://github.com/AndresDFX/aiops-guardia-bedrock.git
+cd aiops-guardia-bedrock
 chmod +x *.sh
-terraform -chdir=terraform init      # ~40 s
-terraform -chdir=terraform apply     # escribe yes; 38 recursos en ~35 s (18 en ~28 s sin la consola web)
-./provocar_fallo.sh                  # el diagnóstico llega 1-2 min después
-./ver_diagnostico.sh
-./restaurar.sh                       # hasta ~1,5 min: espera a que la alarma vuelva sola a OK
-terraform -chdir=terraform destroy   # escribe yes; ~3,5 min por CloudFront (~15 s sin la consola web)
+
+./deploy.sh            # crea todo: comprueba el modelo, instala Terraform si falta, init y apply
+./logs.sh              # en una segunda columna: la terminal del ingeniero de guardia
+./provocar_fallo.sh    # un mal despliegue real; la alarma suena en 1-2 min
+./ver_diagnostico.sh   # severidad, causa raíz y el comando que propone el N1
+./aprobar.sh           # valida ese comando, te pide confirmación y hace el rollback
+./restaurar.sh         # deja todo sano y espera a que la alarma vuelva a OK
+./simular_alarma.sh    # la prueba de honestidad: alarma forzada sin errores nuevos
+./destroy.sh           # borra todo y comprueba en la cuenta que no quedó nada
 ```
 
-- **`./destroy.sh` es el de CloudFormation**: si encuentra recursos en
-  `terraform/terraform.tfstate`, avisa y sale con error sin borrarlos.
-- El estado (`terraform/terraform.tfstate`) vive en `$HOME` y sobrevive a la sesión. No borres la
-  carpeta antes del `destroy`.
-- En una sesión nueva repite los pasos 1 y 2 y `terraform -chdir=terraform init` antes de `plan`,
-  `output` o `destroy`. `restaurar.sh` no necesita Terraform: lee la versión estable de
-  `.version-estable`, que el `apply` deja en la raíz del repo; si no está, del estado, y si tampoco,
-  de la variable `STABLE_VERSIONS` del N1. Así funciona hasta en una sesión que no desplegó nada.
+Dos terminales a la vista en CloudShell: **Actions → Tabs layout → Split into columns**. En la de la
+derecha, `./logs.sh`; en la de la izquierda, el resto.
+
+| Script | Qué hace |
+|---|---|
+| `deploy.sh` | Comprueba la cuenta, la región, el perfil del modelo, el acuerdo de Marketplace y la cuota; instala Terraform si falta; `init` y `apply`. Imprime la URL de la consola web, el PIN y la versión estable. Se puede repetir: si ya está desplegada, no cambia nada |
+| `logs.sh` | `aws logs tail` del N1 en vivo, sin las dos líneas JSON largas |
+| `provocar_fallo.sh` | Mal despliegue real: `DB_HOST` inválido, versión nueva, alias `live` y 12 peticiones |
+| `ver_diagnostico.sh` | Muestra el último diagnóstico de este incidente y lo guarda en `salidas/` |
+| `aprobar.sh` | Valida el `comando_remediacion` con la misma regla que el botón Aprobar de la web y, si lo confirmas, ejecuta **su propio** `update-alias` (nunca el texto del modelo); luego 5 pagos de prueba |
+| `restaurar.sh` | `live` a la versión estable, `DB_HOST=localhost` y espera a que la alarma vuelva sola a OK |
+| `simular_alarma.sh` | Fuerza la alarma sin errores nuevos. No sirve de plan B con producción rota: el modelo la trata como falsa alarma |
+| `destroy.sh` | Borra todo con Terraform, aunque CloudShell se haya reiniciado, y consulta la cuenta para comprobar que no quedó nada |
+| `deploy-cloudformation.sh` · `destroy-cloudformation.sh` | La ruta alternativa en CloudFormation (sin consola web) |
+| `_comun.sh` | Nombres y funciones que comparten los scripts |
+| `terraform/`, `template.yaml` | La infraestructura: app de demo + alias `live`, alarma, regla, Lambda de guardia, IAM de mínimo privilegio, SNS y, en `web.tf`, la consola web |
+| `lambda_function.py` | El N1: recoge contexto, llama a Bedrock con el `SYSTEM_PROMPT`, valida el JSON y publica |
+| `web/` y `src-web/control.py` | La consola web: la página y la Lambda de control que atiende sus botones |
+
+## Lo que comprueba deploy.sh antes de crear nada
+
+Por defecto el modelo es **Claude Sonnet 4.6** por el perfil `us.anthropic.claude-sonnet-4-6`.
+
+1. Que el perfil exista en tu región y solo enrute a regiones que la política IAM autoriza
+   (desde us-east-1: us-east-1, us-east-2 y us-west-2).
+2. El acuerdo de la cuenta con el modelo (`get-foundation-model-availability`). Si no está
+   `AVAILABLE`, hace la **primera invocación con tu usuario**, que es la que lo activa (nunca la
+   Lambda), y espera hasta 5 min a que pase a `AVAILABLE`.
+3. La cuota de tokens por minuto del perfil `us.`: con la cuota en 0, Bedrock responde `is not
+   available for this account` aunque el acuerdo diga `AVAILABLE`.
+
+Si algo falla, no despliega y dice qué hacer:
+
+| Bedrock responde | Qué hacer |
+|---|---|
+| `Model use case details have not been submitted` | Formulario de Anthropic: Bedrock → Model catalog → Claude Sonnet 4.6 → Submit use case details |
+| `INVALID_PAYMENT_INSTRUMENT` | Un método de pago válido: Claude se cobra por AWS Marketplace, que el plan Free no incluye |
+| `... aws-marketplace:Subscribe ...` | Un usuario administrador (permisos de Marketplace) |
+| `is not available for this account` | La cuenta tiene cuota 0 para el modelo: usa otra cuenta |
+| `The provided model identifier is invalid` | Otra región: `export AWS_REGION=us-east-1` |
+| `... still being processed` | La suscripción se está procesando: espera unos minutos y repite `./deploy.sh` |
+
+## Lo que conviene saber de deploy.sh y destroy.sh
+
+- **Opciones:** `EMAIL=tu@correo.com ./deploy.sh` (el diagnóstico llega también por correo),
+  `WEB=false ./deploy.sh` (sin consola web: 18 recursos y un destroy de ~15 s), `OCULTAR_PIN=1`
+  (no muestra el PIN si la pantalla está proyectada) y, para otro modelo, los dos IDs:
+  `MODEL_ID=... FOUNDATION_MODEL_ID=... ./deploy.sh`. Quedan en `terraform/deploy.auto.tfvars`, que
+  Terraform lee solo: el siguiente `./deploy.sh`, `./destroy.sh` y un `terraform plan` a mano usan los
+  mismos valores. Está en `.gitignore` porque puede llevar tu correo.
+- **CloudShell borra Terraform al cerrar la sesión** (va a `/usr/bin`) y `$HOME` tiene 1 GB. Los dos
+  scripts instalan Terraform si falta (comandos oficiales de HashiCorp para Amazon Linux), dejan la
+  caché de providers en `/tmp/terraform-plugins` (el de AWS pesa ~800 MB) y hacen el `init` en cada
+  sesión. El estado (`terraform/terraform.tfstate`) vive en `$HOME`: no borres la carpeta antes del
+  `./destroy.sh`.
+- **`./destroy.sh` no necesita que repitas `WEB=...`:** el destroy actúa sobre el estado. Probado en
+  las dos direcciones: con `-var web_enabled=false` sobre la demo con consola, el plan marca los 38
+  recursos; con el valor por defecto sobre la demo sin consola, borró los 18.
+- **Las dos rutas no conviven:** usan los mismos nombres. `./deploy.sh` se niega si existe el stack de
+  CloudFormation, `./deploy-cloudformation.sh` si el estado de Terraform tiene recursos, y cada
+  destroy manda al otro si lo que queda es de la otra ruta.
+- `restaurar.sh` y `aprobar.sh` no necesitan Terraform: leen la versión estable de `.version-estable`,
+  que deja el despliegue; si no está, del stack, del estado o de la variable `STABLE_VERSIONS` del N1.
 - El despliegue le pasa al N1 la última versión buena conocida (`STABLE_VERSIONS`, la que congela
-  `terraform_data`), y el N1 la incluye siempre en su contexto, aunque haya quedado fuera de las
-  versiones recientes que mira. Sin eso, tras varios despliegues rotos llegó a proponer volver a una
-  versión sana que no era la estable.
+  `terraform_data`), y el N1 la incluye siempre en su contexto. Sin eso, tras varios despliegues rotos
+  llegó a proponer volver a una versión sana que no era la estable.
 - Después de aprobar el rollback, `terraform plan` muestra cambios: `provocar_fallo.sh` dejó el
   `DB_HOST` malo en `$LATEST`. Después de `./restaurar.sh` vuelve a decir "No changes".
-- Diferencias con `template.yaml`: no hay bucket de despliegue (`archive_file` empaqueta
-  `lambda_function.py`), la versión estable se congela en `terraform_data` para que un `apply`
-  después de la demo no mueva `live` a la versión rota, y un `check` avisa si el perfil de
-  inferencia enruta a una región que la política IAM no autoriza.
 
-## La consola web (ruta Terraform)
+## La consola web
 
-El `apply` despliega también una consola web: una página estática en un bucket S3 privado, servida
+`./deploy.sh` despliega también una consola web: una página estática en un bucket S3 privado, servida
 por CloudFront con origin access control, y su API en el mismo dominio (`/api/*`) hacia un HTTP API y
 una Lambda de control, `guardia-web`. Muestra producción, la alarma, la línea de tiempo y el
 diagnóstico, y tiene cuatro botones: Provocar mal despliegue, Simular falsa alarma, Restaurar y
-Aprobar y ejecutar rollback.
-
-```bash
-terraform -chdir=terraform output -raw web_url; echo
-terraform -chdir=terraform output -raw web_pin; echo   # el PIN de los botones
-```
+Aprobar y ejecutar rollback. La URL y el PIN los imprime `./deploy.sh` (si los pierdes, córrelo otra
+vez: no cambia nada).
 
 - CloudFront tarda en publicar el dominio: la página respondió entre 1 y 2,5 min después del `apply`.
   Si no abre, espera y recarga.
-- Mirarla no pide nada. Las acciones piden el PIN (cabecera `X-Pin`, 8 cifras, lo genera Terraform);
-  sin él, 401.
+- Mirarla no pide nada. Las acciones piden el PIN (8 cifras, lo genera Terraform); sin él, 401.
 - El N1 no gana permisos. El rol de `guardia-web` solo mueve el alias y cambia la configuración de la
   app de pagos, fuerza su alarma y lee los logs del N1. Aprobar no ejecuta texto: valida que el comando
-  sea un `update-alias` de `live` a una versión que existe (rechazó con 400 los 10 comandos maliciosos
-  de la prueba).
+  sea un `update-alias` de `live` a una versión que existe. `./aprobar.sh` usa esa misma función,
+  leída de `src-web/control.py`.
 - Costo: menos de USD 0,01 por hora con la página abierta (CloudFront, HTTP API y Lambda cobran por
   petición). La página pide el estado cada 15 s en reposo y cada 3 s durante un incidente, y nada con
   la pestaña oculta; las métricas salen de `GetMetricStatistics`, dentro de la capa gratuita de
-  CloudWatch, con una caché de 30 s. Cerrada, nada.
-- `terraform -chdir=terraform apply -var web_enabled=false` deja la demo solo de terminal: 18 recursos
-  y un `destroy` de ~15 s. Pasa el mismo `-var` al `destroy`.
+  CloudWatch. Cerrada, nada.
 
 ## Con CloudFormation (alternativa)
 
 ```bash
 export AWS_REGION=us-east-1
 chmod +x *.sh
-./deploy.sh              # 2-3 min la primera vez
-./provocar_fallo.sh      # el diagnóstico llega 1-2 min después
+./deploy-cloudformation.sh     # mismas comprobaciones del modelo; ~3 min la primera vez
+./logs.sh                      # y los mismos scripts de la demo
+./provocar_fallo.sh
 ./ver_diagnostico.sh
+./aprobar.sh
 ./restaurar.sh
-./destroy.sh             # ~2 min
+./destroy-cloudformation.sh    # ~3 min; comprueba en la cuenta que no quedó nada
 ```
 
-## Lo medido (Sonnet 4.6, 10-oct-2026)
+## Lo medido
 
-La alarma pasa a `ALARM` entre 35 y 96 s después de que termina `provocar_fallo.sh`, y el diagnóstico
-llega 8-10 s después a los logs (en la consola web, de 7 a 22 s). Bedrock tarda de 6,6 a 8,6 s. Usa de
-1 870 a 3 150 tokens de entrada y de 670 a 870 de salida, y cuesta ≈ USD 0,02 con el perfil `us.` (USD
-3,30 por millón de tokens de entrada y 16,50 por millón de salida). Con el código final, 9 de 9 fallos
-reales dieron SEV1 con el rollback exacto a la versión estable.
+Con Sonnet 4.6, el 10-oct-2026: la alarma pasa a `ALARM` entre 35 y 96 s después de que termina
+`provocar_fallo.sh`, y el diagnóstico llega 8-10 s después a los logs. Bedrock tarda de 6,6 a 8,6 s,
+usa de 1 870 a 3 150 tokens de entrada y de 670 a 870 de salida, y cuesta ≈ USD 0,02 con el perfil
+`us.` (USD 3,30 por millón de tokens de entrada y 16,50 por millón de salida). Con el código final,
+9 de 9 fallos reales dieron SEV1 con el rollback exacto a la versión estable.
+
+Con estos scripts, el 12-oct-2026, en un contenedor que emula CloudShell (Amazon Linux 2023, sin
+Terraform, `$HOME` persistente):
+
+- `./deploy.sh` desde cero: 3 min 38 s (comprobaciones 12 s, instalar Terraform 83 s, `init` 78 s,
+  `apply` de 38 recursos ~40 s). La segunda vez: 45 s y "No changes". La consola ya respondía 200 a
+  1 min 53 s del final.
+- Incidente: `ALARM` 25 s después de que terminó `provocar_fallo.sh` y diagnóstico SEV1 8 s después,
+  con el rollback a la versión estable. `./aprobar.sh`: 15 de 15 pagos de prueba atendidos por la
+  estable en tres aprobaciones; con 6 diagnósticos falsos (5 comandos fuera de la regla y uno vacío),
+  `live` no se movió. `./simular_alarma.sh`: SEV4, posible falsa alarma y nada que aprobar.
+- `./destroy.sh` en una sesión nueva: reinstala Terraform, hace el `init`, borra los 38 recursos
+  (`terraform destroy`, 3 min 33 s, casi todo CloudFront) y la cuenta queda limpia. La instalación y
+  el `init` dependen de la red: 2 min 40 s en la primera corrida y 18 min con la red lenta de esa hora.
+- CloudFormation: `./deploy-cloudformation.sh` 3 min 17 s y `./destroy-cloudformation.sh` 2 min 56 s.
 
 Paso a paso para hacerlo en tu cuenta: la guía del participante, https://docs.google.com/document/d/1IBYyPOUXtjLfahEFQsnwzqiVEjUWGEfe/edit.

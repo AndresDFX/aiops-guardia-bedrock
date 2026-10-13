@@ -17,7 +17,7 @@ Parameters:
 
   DeployBucketName:
     Type: String
-    Description: Bucket donde deploy.sh subio oncall.zip (lo crea el propio script).
+    Description: Bucket donde deploy-cloudformation.sh subio oncall.zip (lo crea el propio script).
 
   OnCallS3Key:
     Type: String
@@ -183,7 +183,7 @@ Resources:
               # modelo base en cada region a la que el perfil puede enrutar.
               # Desde us-east-1, el perfil us. de Sonnet 4.6 enruta a estas tres
               # (comprobado el 10-oct-2026 con aws bedrock get-inference-profile).
-              # deploy.sh lo vuelve a comprobar antes de desplegar.
+              # deploy-cloudformation.sh lo vuelve a comprobar antes de desplegar.
               - Sid: InvocarPerfil
                 Effect: Allow
                 Action: bedrock:InvokeModel
@@ -304,7 +304,7 @@ Outputs:
     Value: !Ref AppFunction
   StableVersion:
     # Lambda NO reinicia la numeracion si recreas una funcion con el mismo nombre:
-    # la primera version del stack puede ser la 3 o la 7. deploy.sh la guarda en
+    # la primera version del stack puede ser la 3 o la 7. deploy-cloudformation.sh la guarda en
     # .version-estable y restaurar.sh la lee de ahi (o de este Output).
     Description: Version estable conocida de app-pagos (destino del rollback)
     Value: !GetAtt AppVersionEstable.Version

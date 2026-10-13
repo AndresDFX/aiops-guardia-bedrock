@@ -11,7 +11,7 @@ aws cloudwatch set-alarm-state --alarm-name "$ALARMA" --state-value ALARM --stat
 echo "Alarma $ALARMA forzada a ALARM. Motivo: $MOTIVO"
 echo ""
 echo "QUE MIRAR AHORA:"
-echo "  - En ~20 s: ./ver_diagnostico.sh"
+echo "  - En ~20 s: ./ver_diagnostico.sh (o mira la columna de ./logs.sh)"
 echo "    Sin errores nuevos y con live en la version estable, espera posible_falsa_alarma=true."
 echo "  - La alarma vuelve sola a su estado real en la siguiente evaluacion (medido: de 20 a 95 s)."
 echo "    El cambio queda en su historial:"
