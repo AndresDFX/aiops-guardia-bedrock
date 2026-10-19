@@ -350,6 +350,14 @@ resource "aws_lambda_function" "web" {
       ONCALL_LOG_GROUP = aws_cloudwatch_log_group.oncall.name
       STABLE_VERSION   = terraform_data.version_estable.output
       DEMO_PIN         = random_password.pin[0].result
+      # Para los enlaces a la consola de AWS de cada paso (sin el ID de cuenta) y los rotulos.
+      APP_LOG_GROUP       = aws_cloudwatch_log_group.app.name
+      ONCALL_NAME         = aws_lambda_function.oncall.function_name
+      RULE_NAME           = aws_cloudwatch_event_rule.alarma.name
+      SNS_TOPIC_NAME      = aws_sns_topic.incidentes.name
+      WEB_NAME            = local.web_name
+      MODEL_ID            = var.model_id
+      FOUNDATION_MODEL_ID = var.foundation_model_id
     }
   }
 

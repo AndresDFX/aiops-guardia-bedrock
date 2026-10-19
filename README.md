@@ -11,10 +11,7 @@ borra; entre los dos, un script por cada acción de la demo. La infraestructura 
 ## De punta a punta
 
 ```bash
-export AWS_REGION=us-east-1
-git clone https://github.com/AndresDFX/aiops-guardia-bedrock.git
-cd aiops-guardia-bedrock
-chmod +x *.sh
+git clone https://github.com/AndresDFX/aiops-guardia-bedrock.git && cd aiops-guardia-bedrock
 
 ./deploy.sh            # crea todo: comprueba el modelo, instala Terraform si falta, init y apply
 ./logs.sh              # en una segunda columna: la terminal del ingeniero de guardia
@@ -99,10 +96,24 @@ Si algo falla, no despliega y dice qué hacer:
 
 `./deploy.sh` despliega también una consola web: una página estática en un bucket S3 privado, servida
 por CloudFront con origin access control, y su API en el mismo dominio (`/api/*`) hacia un HTTP API y
-una Lambda de control, `guardia-web`. Muestra producción, la alarma, la línea de tiempo y el
-diagnóstico, y tiene cuatro botones: Provocar mal despliegue, Simular falsa alarma, Restaurar y
-Aprobar y ejecutar rollback. La URL y el PIN los imprime `./deploy.sh` (si los pierdes, córrelo otra
-vez: no cambia nada).
+una Lambda de control, `guardia-web`. La URL y el PIN los imprime `./deploy.sh` (si los pierdes,
+córrelo otra vez: no cambia nada). Lo que muestra:
+
+- **Recorrido del incidente en AWS:** los siete pasos por los que pasa el incidente (app de pagos,
+  alarma, regla de EventBridge, el N1, Bedrock, el diagnóstico en Logs y SNS, y tú), que se encienden en
+  orden con su hora. Cada paso tiene enlaces ↗ a la consola de AWS: la alarma, la regla, las versiones de
+  la app, CloudTrail, el modelo y los logs de **esa** invocación del N1. Solo llevan la región y los
+  nombres, nunca el ID de cuenta, y abren la consola de quien tenga la sesión iniciada en la cuenta.
+- **Siguiente paso:** qué hacer ahora (esperar la alarma, comparar la versión, aprobar, restaurar…).
+- Producción, la alarma y las acciones: Provocar mal despliegue, Simular falsa alarma y Restaurar.
+- El diagnóstico, en tres pestañas: **Diagnóstico** (con Aprobar y ejecutar rollback), **Contexto que
+  vio el N1** (el `CONTEXTO_JSON` que la Lambda le mandó a Claude: métricas por minuto, errores
+  agrupados, versiones con live y la estable, cambios en CloudTrail) y **JSON** (los dos, tal cual).
+
+La traza sale del log del N1: `/api/diagnostico` lee sus líneas `[guardia] ...`, `CONTEXTO_JSON` y
+`DIAGNOSTICO_JSON` de la última invocación y devuelve cuándo lo despertó EventBridge, cuánto tardaron
+el contexto y Bedrock y cuándo publicó en SNS. El rol de la consola ya podía leer ese log: no ganó
+permisos.
 
 - CloudFront tarda en publicar el dominio: la página respondió entre 1 y 2,5 min después del `apply`.
   Si no abre, espera y recarga.
@@ -119,8 +130,6 @@ vez: no cambia nada).
 ## Con CloudFormation (alternativa)
 
 ```bash
-export AWS_REGION=us-east-1
-chmod +x *.sh
 ./deploy-cloudformation.sh     # mismas comprobaciones del modelo; ~3 min la primera vez
 ./logs.sh                      # y los mismos scripts de la demo
 ./provocar_fallo.sh

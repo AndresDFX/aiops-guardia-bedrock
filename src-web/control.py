@@ -5,8 +5,11 @@ El ingeniero de guardia N1 (guardia-oncall) tiene un rol de SOLO LECTURA: propon
 ejecuta. Esta Lambda es la que cambia cosas, y solo cuando alguien pulsa un boton de la
 consola con el PIN de la demo. Hace lo mismo que los scripts de la terminal:
 
-  GET  /api/estado        produccion (alias live), alarma y errores por minuto
-  GET  /api/diagnostico   ultimo DIAGNOSTICO_JSON del N1 desde un instante  (ver_diagnostico.sh)
+  GET  /api/estado        produccion (alias live), alarma, errores por minuto y los enlaces a la
+                          consola de AWS de cada pieza
+  GET  /api/diagnostico   ultimo DIAGNOSTICO_JSON del N1 desde un instante  (ver_diagnostico.sh),
+                          con la traza de esa invocacion (cuando lo desperto EventBridge, cuanto
+                          tardaron el contexto y Bedrock) y el CONTEXTO_JSON que le mando a Claude
   POST /api/provocar      mal despliegue real                                (provocar_fallo.sh)  PIN
   POST /api/simular       alarma forzada sin errores nuevos                  (simular_alarma.sh)  PIN
   POST /api/aprobar       el rollback que propuso el N1, si y solo si es un
@@ -25,6 +28,7 @@ import re
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
@@ -36,6 +40,14 @@ LOG_ONCALL = os.environ.get("ONCALL_LOG_GROUP", "/aws/lambda/guardia-oncall")
 ESTABLE = os.environ.get("STABLE_VERSION", "")   # la congela Terraform en terraform_data
 PIN = os.environ.get("DEMO_PIN", "")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
+# Las demas piezas de la demo, para los enlaces a la consola de AWS y los rotulos de la pagina.
+ONCALL = os.environ.get("ONCALL_NAME", "guardia-oncall")
+REGLA = os.environ.get("RULE_NAME", "guardia-alarma-a-oncall")
+TOPICO = os.environ.get("SNS_TOPIC_NAME", "guardia-incidentes")
+WEB = os.environ.get("WEB_NAME", "guardia-web")
+LOG_APP = os.environ.get("APP_LOG_GROUP", f"/aws/lambda/{APP}")
+MODELO = os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+MODELO_BASE = os.environ.get("FOUNDATION_MODEL_ID", "anthropic.claude-sonnet-4-6")
 
 # Los mismos valores que los scripts de la terminal.
 HOST_MALO = os.environ.get("HOST_MALO", "db-pagos.prod.internal")     # provocar_fallo.sh
@@ -154,6 +166,61 @@ def _exigir_pin(event):
 
 
 # ─────────────────────────────────────────────────────────────
+# Enlaces a la consola de AWS: para ver cada paso del incidente donde de verdad ocurre.
+# Solo llevan la region y los nombres de los recursos, nunca el ID de cuenta (por eso el de
+# SNS va a la lista de topicos y no al ARN). Abren la consola de quien hace clic: funcionan
+# para quien tiene la sesion iniciada en la cuenta donde vive la demo.
+# ─────────────────────────────────────────────────────────────
+CONSOLA = f"https://{REGION}.console.aws.amazon.com"
+
+
+def _logs_q(texto):
+    """La consola de CloudWatch Logs (logsV2) lee su fragmento doblemente codificado y con $ en
+    lugar de %: '/aws/lambda/x' se escribe '$252Faws$252Flambda$252Fx'."""
+    return quote(quote(texto, safe=""), safe="").replace("%", "$")
+
+
+def enlace_logs(grupo, flujo=None, patron=None, desde_ms=None, hasta_ms=None):
+    """Un log group, o uno de sus flujos, con filtro y ventana de tiempo opcionales."""
+    url = f"{CONSOLA}/cloudwatch/home?region={REGION}#logsV2:log-groups/log-group/{_logs_q(grupo)}/log-events"
+    if flujo:
+        url += "/" + _logs_q(flujo)
+    params = []
+    if patron:
+        params.append("filterPattern=" + quote(patron, safe=""))
+    if desde_ms:
+        params.append(f"start={int(desde_ms)}")
+    if hasta_ms:
+        params.append(f"end={int(hasta_ms)}")
+    if params:
+        url += quote("?" + "&".join(params), safe="").replace("%", "$")
+    return url
+
+
+def _lambda(funcion, cola=""):
+    return f"{CONSOLA}/lambda/home?region={REGION}#/functions/{quote(funcion, safe='')}{cola}"
+
+
+ENLACES = {
+    "app": _lambda(APP, "?tab=code"),
+    "app_versiones": _lambda(APP, "?tab=versions"),
+    "app_version": _lambda(APP, "/versions/{v}?tab=configure"),     # {v} lo pone la pagina
+    "app_alias": _lambda(APP, "/aliases/live?tab=configure"),
+    "app_logs": enlace_logs(LOG_APP),
+    "app_cloudtrail": f"{CONSOLA}/cloudtrailv2/home?region={REGION}#/events?ResourceName={quote(APP, safe='')}",
+    "alarma": f"{CONSOLA}/cloudwatch/home?region={REGION}#alarmsV2:alarm/{quote(ALARMA, safe='')}",
+    "regla": f"{CONSOLA}/events/home?region={REGION}#/eventbus/default/rules/{quote(REGLA, safe='')}",
+    "oncall": _lambda(ONCALL, "?tab=monitor"),
+    "oncall_logs": enlace_logs(LOG_ONCALL),
+    "bedrock": f"{CONSOLA}/bedrock/home?region={REGION}#/model-catalog/serverless/{MODELO_BASE}",
+    "sns": f"{CONSOLA}/sns/v3/home?region={REGION}#/topics",
+    "consola": _lambda(WEB, "?tab=monitor"),
+}
+NOMBRES = {"app": APP, "alarma": ALARMA, "regla": REGLA, "oncall": ONCALL, "topico": TOPICO,
+           "consola": WEB, "modelo": MODELO, "region": REGION}
+
+
+# ─────────────────────────────────────────────────────────────
 # Lecturas
 # ─────────────────────────────────────────────────────────────
 def _version(v):
@@ -235,46 +302,110 @@ def estado():
             },
             "alarma": _alarma(),
             "metricas": puntos,
+            "enlaces": ENLACES,
+            "nombres": NOMBRES,
             "ahora_ms": _ahora_ms(),
         }
     return _cacheado("estado", 2, leer)
 
 
-def _ultimo_evento(patron, desde_ms):
-    ultimo = None
+# Las lineas que escribe el N1 (lambda_function.py), en el orden en que pasan.
+_N1_INICIO = re.compile(r"\[guardia\] Alarma (\S+) -> ALARM")
+_N1_CONTEXTO = re.compile(r"\[guardia\] Contexto recogido en ([\d.]+)s: (\d+) caracteres")
+_N1_BEDROCK = re.compile(r"\[guardia\] Bedrock respondio en ([\d.]+)s tokens_in=(\S+) tokens_out=(\S+) "
+                         r"stop=(\S+) json_limpio=(\S+)")
+_N1_SNS = re.compile(r"\[guardia\] Diagnostico publicado en SNS")
+
+
+def _eventos_n1(desde_ms):
+    """Todas las lineas con marca del N1 desde el incidente, en orden. Una sola busqueda (con O)."""
+    eventos = []
     paginas = logs.get_paginator("filter_log_events").paginate(
-        logGroupName=LOG_ONCALL, startTime=desde_ms, filterPattern=patron,
-        PaginationConfig={"MaxItems": 200})
+        logGroupName=LOG_ONCALL, startTime=desde_ms,
+        filterPattern='?"[guardia]" ?"CONTEXTO_JSON" ?"DIAGNOSTICO_JSON"',
+        PaginationConfig={"MaxItems": 300})
     for pagina in paginas:
-        for e in pagina.get("events", []):
-            if ultimo is None or e["timestamp"] >= ultimo["timestamp"]:
-                ultimo = e
-    return ultimo
+        eventos.extend(pagina.get("events", []))
+    return sorted(eventos, key=lambda e: (e["timestamp"], e.get("ingestionTime", 0)))
+
+
+def _json_tras(texto, marca):
+    try:
+        return json.loads(texto.split(marca, 1)[1])
+    except (IndexError, json.JSONDecodeError):
+        return None
 
 
 def diagnostico(desde_ms):
-    """La misma busqueda que ver_diagnostico.sh: el ultimo DIAGNOSTICO_JSON desde el incidente."""
+    """
+    La misma busqueda que ver_diagnostico.sh (el ultimo DIAGNOSTICO_JSON desde el incidente), mas
+    la traza de esa invocacion del N1, leida de su log: cuando lo desperto EventBridge, cuanto tardo
+    en juntar el contexto y cual fue (CONTEXTO_JSON), cuanto tardo Bedrock y cuando publico en SNS.
+    Mientras Bedrock piensa, la traza ya trae lo que va pasando: la pagina enciende cada paso.
+    """
     def leer():
         try:
-            e = _ultimo_evento('"DIAGNOSTICO_JSON"', desde_ms)
+            eventos = _eventos_n1(desde_ms)
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "ResourceNotFoundException":
                 return {"listo": False, "aviso": f"El log group {LOG_ONCALL} todavia no existe."}
             raise
-        if e:
-            texto = e["message"].strip()
-            crudo = texto.split("DIAGNOSTICO_JSON: ", 1)[-1]
-            try:
-                resultado = json.loads(crudo)
-            except json.JSONDecodeError:
-                return {"listo": False, "aviso": "El diagnostico del N1 no es JSON valido."}
-            return {"listo": True, "hora_ms": e["timestamp"], "resultado": resultado}
-        # Si el N1 ya fallo (sin acceso al modelo, cuota en 0, throttling), su log lo dice:
-        # no tiene sentido que la pantalla siga diciendo "esperando".
-        fallo = _ultimo_evento('"[guardia] ERROR"', desde_ms)
-        if fallo:
-            return {"listo": False, "fallo_n1": fallo["message"].strip()[:400], "hora_ms": fallo["timestamp"]}
-        return {"listo": False}
+        inicios = [e for e in eventos if _N1_INICIO.search(e["message"])]
+        if not inicios:
+            fallo = next((e for e in reversed(eventos) if "[guardia] ERROR" in e["message"]), None)
+            if fallo:
+                return {"listo": False, "fallo_n1": fallo["message"].strip()[:400], "hora_ms": fallo["timestamp"]}
+            return {"listo": False, "traza": {}}
+        # Que invocacion contar: la del ultimo DIAGNOSTICO_JSON si ya hay uno (EventBridge puede
+        # entregar el evento dos veces y Lambda reintenta si falla), y si no, la ultima que vio la
+        # alarma en ALARM. Una Lambda escribe cada invocacion en orden dentro de su flujo: lo de
+        # esta invocacion es lo de su flujo desde su primera linea hasta la siguiente invocacion.
+        diags = [e for e in eventos if e["message"].lstrip().startswith("DIAGNOSTICO_JSON: ")]
+        ini = inicios[-1]
+        if diags:
+            previos = [e for e in inicios if e["logStreamName"] == diags[-1]["logStreamName"]
+                       and e["timestamp"] <= diags[-1]["timestamp"]]
+            ini = previos[-1] if previos else ini
+        flujo = ini["logStreamName"]
+        siguiente = next((e["timestamp"] for e in inicios if e["logStreamName"] == flujo
+                          and e["timestamp"] > ini["timestamp"]), None)
+        propios = [e for e in eventos if e["logStreamName"] == flujo and e["timestamp"] >= ini["timestamp"]
+                   and (siguiente is None or e["timestamp"] < siguiente)]
+        traza = {"n1_inicio_ms": ini["timestamp"]}
+        respuesta = {"listo": False, "traza": traza}
+        for e in propios:
+            msg = e["message"].strip()
+            m = _N1_CONTEXTO.search(msg)
+            if m:
+                traza.update(contexto_ms=e["timestamp"], contexto_s=float(m.group(1)),
+                             contexto_caracteres=int(m.group(2)))
+                continue
+            m = _N1_BEDROCK.search(msg)
+            if m:
+                traza.update(bedrock_ms=e["timestamp"], bedrock_s=float(m.group(1)))
+                continue
+            if msg.startswith("CONTEXTO_JSON: "):
+                contexto = _json_tras(msg, "CONTEXTO_JSON: ")
+                if isinstance(contexto, dict):
+                    respuesta["contexto"] = contexto
+            elif msg.startswith("DIAGNOSTICO_JSON: "):
+                resultado = _json_tras(msg, "DIAGNOSTICO_JSON: ")
+                if not isinstance(resultado, dict):
+                    respuesta["aviso"] = "El diagnostico del N1 no es JSON valido."
+                    continue
+                traza["diagnostico_ms"] = e["timestamp"]
+                respuesta.update(listo=True, hora_ms=e["timestamp"], resultado=resultado)
+            elif _N1_SNS.search(msg):
+                traza["sns_ms"] = e["timestamp"]
+            elif "[guardia] ERROR" in msg:
+                # Sin acceso al modelo, cuota en 0, throttling: el log lo dice, y la pantalla tambien.
+                respuesta.update(fallo_n1=msg[:400], hora_ms=e["timestamp"])
+        # Los logs de ESTA invocacion en la consola de AWS: del aviso de EventBridge al SNS.
+        fin = propios[-1]["timestamp"] if propios else ini["timestamp"]
+        respuesta["enlaces"] = {"invocacion": enlace_logs(LOG_ONCALL, flujo=flujo,
+                                                          desde_ms=ini["timestamp"] - 2000,
+                                                          hasta_ms=fin + 2000)}
+        return respuesta
     return _cacheado(f"diagnostico:{desde_ms}", 3, leer)
 
 

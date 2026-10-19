@@ -435,6 +435,8 @@ def publicar(alarma, dx):
     print(cuerpo)
     if SNS_TOPIC_ARN:
         sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=asunto, Message=cuerpo)
+        # La consola web marca el paso "publicado" con esta linea (solo el nombre del topico).
+        print(f"[guardia] Diagnostico publicado en SNS ({SNS_TOPIC_ARN.rsplit(':', 1)[-1]})")
 
 
 def lambda_handler(event, context):

@@ -24,12 +24,26 @@
     <p class="conexion" id="conexion" role="status"><span class="punto"></span><span id="conexion-texto">Conectando…</span></p>
   </header>
 
+  <section class="tarjeta recorrido" id="t-recorrido" aria-labelledby="recorrido-titulo">
+    <header class="cabeza">
+      <div class="cabeza-titulo">
+        <h2 id="recorrido-titulo" title="Cada ↗ abre ese paso en la consola de AWS (con tu sesión iniciada en la cuenta de la demo)">Recorrido del incidente en AWS <span class="pista-enlaces">· los ↗ abren la consola de AWS</span></h2>
+        <span class="etiqueta" id="linea-tipo"></span>
+      </div>
+      <p class="siguiente" id="siguiente" role="status" aria-live="polite"></p>
+    </header>
+    <ol class="nodos" id="nodos"></ol>
+  </section>
+
   <main class="tablero">
     <aside class="columna">
       <article class="tarjeta" id="t-produccion">
         <header class="cabeza">
           <h2>Producción</h2>
-          <code id="prod-funcion">guardia-app-pagos:live</code>
+          <span class="cabeza-derecha">
+            <code id="prod-funcion">guardia-app-pagos:live</code>
+            <a class="enlace-aws" id="prod-enlace" target="_blank" rel="noopener noreferrer" hidden>↗ Alias</a>
+          </span>
         </header>
         <div class="fila-insignia">
           <span class="insignia gris" id="prod-insignia">…</span>
@@ -38,12 +52,12 @@
         <div class="versiones">
           <div class="version" id="caja-live">
             <span class="version-rotulo">live apunta a</span>
-            <span class="version-numero" id="prod-live">–</span>
+            <a class="version-numero" id="prod-live" target="_blank" rel="noopener noreferrer">–</a>
             <span class="version-desc" id="prod-live-desc"></span>
           </div>
           <div class="version estable">
             <span class="version-rotulo">Versión estable</span>
-            <span class="version-numero" id="prod-estable">–</span>
+            <a class="version-numero" id="prod-estable" target="_blank" rel="noopener noreferrer">–</a>
             <span class="version-desc" id="prod-estable-desc"></span>
           </div>
         </div>
@@ -56,7 +70,10 @@
       <article class="tarjeta" id="t-alarma">
         <header class="cabeza">
           <h2>Alarma</h2>
-          <code id="alarma-nombre">guardia-app-pagos-errores</code>
+          <span class="cabeza-derecha">
+            <code id="alarma-nombre">guardia-app-pagos-errores</code>
+            <a class="enlace-aws" id="alarma-enlace" target="_blank" rel="noopener noreferrer" hidden>↗ CloudWatch</a>
+          </span>
         </header>
         <div class="fila-insignia">
           <span class="insignia gris" id="alarma-insignia">…</span>
@@ -90,22 +107,14 @@
     </aside>
 
     <section class="columna ancha">
-      <article class="tarjeta" id="t-linea">
-        <header class="cabeza">
-          <h2>Línea de tiempo del incidente</h2>
-          <span class="etiqueta" id="linea-tipo"></span>
-        </header>
-        <ol class="pasos" id="pasos"></ol>
-      </article>
-
       <article class="tarjeta diagnostico" id="t-diagnostico">
         <header class="cabeza">
           <h2>Diagnóstico del ingeniero de guardia</h2>
-          <label class="interruptor" id="crudo-control" hidden>
-            <input type="checkbox" id="crudo">
-            <span class="riel" aria-hidden="true"></span>
-            <span>Ver JSON crudo</span>
-          </label>
+          <nav class="pestanas" id="pestanas" role="tablist" aria-label="Vistas del diagnóstico" hidden>
+            <button type="button" role="tab" class="pestana" data-vista="dx" aria-selected="true">Diagnóstico</button>
+            <button type="button" role="tab" class="pestana" data-vista="contexto" aria-selected="false">Contexto que vio el N1</button>
+            <button type="button" role="tab" class="pestana" data-vista="json" aria-selected="false">JSON</button>
+          </nav>
         </header>
         <div id="dx"></div>
       </article>
@@ -115,7 +124,7 @@
   <dialog id="d-pin" aria-labelledby="pin-titulo">
     <form id="f-pin" method="dialog">
       <h2 id="pin-titulo">PIN de la demo</h2>
-      <p>Los botones cambian cosas en la cuenta. El PIN lo generó Terraform:</p>
+      <p>Los botones cambian cosas en la cuenta. El PIN lo imprimió <code>./deploy.sh</code> al terminar; también lo da:</p>
       <pre>terraform -chdir=terraform output -raw web_pin</pre>
       <label for="i-pin">PIN</label>
       <input id="i-pin" type="password" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="64">
