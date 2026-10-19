@@ -162,4 +162,16 @@ Terraform, `$HOME` persistente):
   el `init` dependen de la red: 2 min 40 s en la primera corrida y 18 min con la red lenta de esa hora.
 - CloudFormation: `./deploy-cloudformation.sh` 3 min 17 s y `./destroy-cloudformation.sh` 2 min 56 s.
 
+Con la consola del recorrido y los enlaces, el 18-oct-2026, en el mismo contenedor y con otro prefijo
+(`PROJECT=guardiaux`, 38 recursos):
+
+- `./deploy.sh` desde cero: 5 min 56 s. La página respondió 20 s después.
+- Incidente por la consola: la alarma saltó 1 min 3 s después del mal despliegue; EventBridge despertó
+  al N1 en 1 s; contexto en 1,1 s; Bedrock en 6,4 s (1.903 tokens de entrada y 705 de salida, ≈ USD
+  0,018); el diagnóstico salió en pantalla 21 s después de la alarma, con el rollback a la estable.
+  Aprobado: 5 de 5 pagos sin error. Tras Restaurar, la alarma volvió sola a OK en 26 s; la falsa
+  alarma dio SEV4 sin comando en unos 10 s.
+- Los 13 enlaces a la consola de AWS abrieron el recurso correcto (sesión federada de solo lectura).
+- `./destroy.sh` en un contenedor nuevo: 6 min 00 s, y la cuenta quedó limpia.
+
 Paso a paso para hacerlo en tu cuenta: la guía del participante, https://docs.google.com/document/d/1IBYyPOUXtjLfahEFQsnwzqiVEjUWGEfe/edit.
