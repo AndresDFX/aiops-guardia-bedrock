@@ -830,7 +830,7 @@ function propuesta(d) {
   return caja;
 }
 
-// Lo que la Lambda del N1 le mandó a Claude, tal cual: la ingeniería de contexto a la vista.
+// Lo que la Lambda del N1 le mandó a Claude, tal cual: el context engineering a la vista.
 function seriesPorMinuto(metricas) {
   const filas = {};
   const columnas = [["Invocations.Sum", "Invocaciones"], ["Errors.Sum", "Errores"], ["Duration.Average", "Duración media (ms)"]];
