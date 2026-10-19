@@ -1,5 +1,5 @@
 """
-Guardia N1 — Ingeniero DevOps de guardia (Nivel 1) con Amazon Bedrock.
+Guardia N1 — Ingeniero DevOps on-call (Nivel 1) con Amazon Bedrock.
 
 Flujo (event-driven, nadie hace polling):
   1. Una alarma de CloudWatch pasa a ALARM.

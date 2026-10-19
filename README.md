@@ -1,4 +1,4 @@
-# Guardia N1 — Ingeniero DevOps de guardia con Amazon Bedrock
+# Guardia N1 — Ingeniero DevOps on-call con Amazon Bedrock
 
 Alarma de CloudWatch → EventBridge → Lambda (contexto) → Claude Sonnet 4.6 (Bedrock, Converse)
 → diagnóstico JSON con severidad, causa raíz y comando exacto → CloudWatch Logs + SNS.
@@ -14,7 +14,7 @@ borra; entre los dos, un script por cada acción de la demo. La infraestructura 
 git clone https://github.com/AndresDFX/aiops-guardia-bedrock.git && cd aiops-guardia-bedrock
 
 ./deploy.sh            # crea todo: comprueba el modelo, instala Terraform si falta, init y apply
-./logs.sh              # en una segunda columna: la terminal del ingeniero de guardia
+./logs.sh              # en una segunda columna: la terminal del ingeniero on-call
 ./provocar_fallo.sh    # un mal despliegue real; la alarma suena en 1-2 min
 ./ver_diagnostico.sh   # severidad, causa raíz y el comando que propone el N1
 ./aprobar.sh           # valida ese comando, te pide confirmación y hace el rollback
@@ -38,7 +38,7 @@ derecha, `./logs.sh`; en la de la izquierda, el resto.
 | `destroy.sh` | Borra todo con Terraform, aunque CloudShell se haya reiniciado, y consulta la cuenta para comprobar que no quedó nada |
 | `deploy-cloudformation.sh` · `destroy-cloudformation.sh` | La ruta alternativa en CloudFormation (sin consola web) |
 | `_comun.sh` | Nombres y funciones que comparten los scripts |
-| `terraform/`, `template.yaml` | La infraestructura: app de demo + alias `live`, alarma, regla, Lambda de guardia, IAM de mínimo privilegio, SNS y, en `web.tf`, la consola web |
+| `terraform/`, `template.yaml` | La infraestructura: app de demo + alias `live`, alarma, regla, Lambda on-call, IAM con least privilege, SNS y, en `web.tf`, la consola web |
 | `lambda_function.py` | El N1: recoge contexto, llama a Bedrock con el `SYSTEM_PROMPT`, valida el JSON y publica |
 | `web/` y `src-web/control.py` | La consola web: la página y la Lambda de control que atiende sus botones |
 

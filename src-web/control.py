@@ -1,7 +1,7 @@
 """
 Consola web de Guardia N1: las manos del humano.
 
-El ingeniero de guardia N1 (guardia-oncall) tiene un rol de SOLO LECTURA: propone y no
+El ingeniero on-call N1 (guardia-oncall) tiene un rol de SOLO LECTURA: propone y no
 ejecuta. Esta Lambda es la que cambia cosas, y solo cuando alguien pulsa un boton de la
 consola con el PIN de la demo. Hace lo mismo que los scripts de la terminal:
 
