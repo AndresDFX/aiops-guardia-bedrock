@@ -188,9 +188,9 @@ Con el error de código, el 24-oct-2026, en el mismo contenedor y con otro prefi
   salieron SEV1 y una SEV2: la que vino justo después de un mal despliegue de configuración, con los
   errores de los dos en la ventana de 15 min. Bedrock tardó de 7,0 a 9,8 s, y una vez 18 s, con 1 911
   a 2 935 tokens de entrada y 729 a 900 de salida (≈ USD 0,02).
-- La alarma saltó entre 27 s y 1 min después del despliegue con el bug. En tres corridas, CloudTrail
-  todavía no mostraba el `UpdateFunctionCode` cuando el N1 juntó el contexto: el cambio lo delató el
-  hash del código (otro hash, las mismas variables).
+- La alarma saltó entre 14 s y 1 min después del despliegue con el bug. En cinco de las seis corridas,
+  CloudTrail todavía no mostraba el `UpdateFunctionCode` cuando el N1 juntó el contexto: el cambio lo
+  delató el hash del código (otro hash, las mismas variables).
 - `./restaurar.sh` y el botón Restaurar devolvieron el código de la estable (mismo `CodeSha256`) y
   `terraform plan` dijo "No changes". La falsa alarma, con los errores del bug todavía en la ventana,
   siguió en SEV4 sin comando, y el mal despliegue de configuración siguió dando SEV1 con la estable.
