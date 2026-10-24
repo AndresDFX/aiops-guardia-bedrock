@@ -309,6 +309,22 @@ buscar_version_estable() {
   es_numero "$ESTABLE"
 }
 
+# Compara el $LATEST de la app con una version: codigo (CodeSha256) y DB_HOST. Lo usan
+# provocar_fallo.sh, que no rompe sobre un fallo anterior sin restaurar (la version nueva
+# arrastraria los dos problemas), y restaurar.sh. Deja en DIF lo que cambia ("codigo",
+# "DB_HOST" o "codigo y DB_HOST") y devuelve 0 si no cambia nada.
+comparar_con_version() {   # $1 = version
+  local a b
+  a=$(aws lambda get-function-configuration --function-name "$APP" \
+    --query '[CodeSha256,Environment.Variables.DB_HOST]' --output text | tr -d '\r')
+  b=$(aws lambda get-function-configuration --function-name "$APP" --qualifier "$1" \
+    --query '[CodeSha256,Environment.Variables.DB_HOST]' --output text | tr -d '\r')
+  DIF=""
+  [ "$(echo "$a" | cut -f1)" != "$(echo "$b" | cut -f1)" ] && DIF="codigo"
+  [ "$(echo "$a" | cut -f2)" != "$(echo "$b" | cut -f2)" ] && DIF="${DIF:+$DIF y }DB_HOST"
+  [ -z "$DIF" ]
+}
+
 # El ultimo DIAGNOSTICO_JSON del N1 desde el ultimo incidente provocado (.ultimo-incidente) o, si
 # no hay, de los ultimos MIN minutos. Lo usan ver_diagnostico.sh y aprobar.sh: la misma fuente.
 # Deja en DIAG_JSON el JSON (vacio si aun no hay) y en DESDE el instante (ms) desde el que busco.

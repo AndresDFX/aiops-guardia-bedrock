@@ -277,10 +277,11 @@ function pedirPin(error = "") {
 }
 
 const EN_CURSO = {
-  provocar: "Desplegando la versión rota y mandando 12 peticiones…",
+  provocar: "Desplegando la versión con el DB_HOST malo y mandando 12 peticiones…",
+  codigo: "Desplegando la versión con el bug y mandando 12 peticiones…",
   simular: "Forzando la alarma…",
   aprobar: "Ejecutando el rollback aprobado y probando live…",
-  restaurar: "Restaurando: live a la versión estable y DB_HOST=localhost…",
+  restaurar: "Restaurando: live a la versión estable, DB_HOST=localhost y el código de la estable…",
 };
 
 function resultado(clase, texto) {
@@ -344,6 +345,15 @@ const DESPUES = {
     resultado("ok", `Mal despliegue hecho: live pasó de v${d.version_antes} a v${d.version_nueva} y ` +
       `${d.errores} de ${d.peticiones} peticiones fallaron. La alarma tarda de 30 s a 2 min.`);
   },
+  codigo(d) {
+    nuevoIncidente({
+      tipo: "codigo", desde: d.desde, creado: Date.now(), despliegue_ms: d.despliegue_ms,
+      version_rota: d.version_nueva, version_antes: d.version_antes, trafico: d.trafico,
+      errores: d.errores, peticiones: d.peticiones,
+    });
+    resultado("ok", `Despliegue con un bug: live pasó de v${d.version_antes} a v${d.version_nueva} y ` +
+      `${d.errores} de ${d.peticiones} peticiones fallaron. El error crudo está en los logs de la app (paso 1).`);
+  },
   simular(d) {
     nuevoIncidente({ tipo: "simulada", desde: d.desde, creado: Date.now(), motivo: d.motivo });
     resultado("ok", "Alarma forzada a ALARM sin errores nuevos. El diagnóstico llega en 10 a 30 s.");
@@ -363,7 +373,8 @@ const DESPUES = {
       incidente.restaurado_ms = ahora();
       guardarIncidente();
     }
-    resultado(d.humo === "OK" ? "ok" : "error", `Restaurado: live en v${d.live} y DB_HOST=localhost. ` +
+    resultado(d.humo === "OK" ? "ok" : "error", `Restaurado: live en v${d.live}, DB_HOST=localhost` +
+      `${d.codigo_restaurado ? " y el código de la estable" : ""}. ` +
       `Prueba de humo: ${d.humo}. La alarma vuelve sola a OK en un minuto y medio, más o menos.`);
   },
 };
@@ -401,7 +412,7 @@ function pintarProduccion() {
     $("prod-texto").textContent = "live está en la versión estable";
   } else if (p.salud === "rota") {
     insignia("prod-insignia", "ROTA", "rojo", true);
-    $("prod-texto").textContent = "live salió de la versión estable";
+    $("prod-texto").textContent = `live salió de la versión estable${p.cambio ? ` (cambia: ${p.cambio === "codigo" ? "el código" : p.cambio})` : ""}`;
   } else {
     insignia("prod-insignia", "OTRA VERSIÓN", "ambar");
     $("prod-texto").textContent = "live no está en la versión estable";
@@ -418,6 +429,10 @@ function pintarProduccion() {
   const db = $("prod-dbhost");
   db.textContent = p.live_db_host || "(sin DB_HOST)";
   db.className = p.live_db_host === p.estable_db_host ? "" : "mal";
+  const cod = $("prod-codigo");
+  const igual = p.live_codigo === p.estable_codigo;
+  cod.textContent = p.live_codigo ? `${p.live_codigo}… (${igual ? "el de la estable" : "distinto del de la estable"})` : "–";
+  cod.className = igual ? "" : "mal";
   pintarGrafico(estado.metricas || []);
 }
 
@@ -486,6 +501,7 @@ function pintarBotones() {
   aviso.textContent = bloqueo;
   aviso.hidden = !bloqueo;
   $("b-provocar").disabled = ocupado || Boolean(bloqueo);
+  $("b-codigo").disabled = ocupado || Boolean(bloqueo);
   $("b-simular").disabled = ocupado || Boolean(bloqueo);
   $("b-restaurar").disabled = ocupado;
 }
@@ -523,15 +539,17 @@ function nodosDelRecorrido() {
   const nodos = [];
 
   // 1. La app de pagos
+  // Aquí se ve el error crudo: los logs de la app (lo que el N1 resume), sus versiones y CloudTrail.
   const app = { clave: "app", titulo: "App de pagos", servicio: "Lambda", recurso: `${N.app || "guardia-app-pagos"}:live`,
-    enlaces: [["Versiones", L.app_versiones], ["CloudTrail", L.app_cloudtrail]] };
+    enlaces: [["Logs", L.app_logs], ["Versiones", L.app_versiones], ["CloudTrail", L.app_cloudtrail]] };
   if (!i) {
     Object.assign(app, p ? { estado: p.salud === "sana" ? "espera" : "mal", detalle: `live en v${p.live}${p.salud === "sana" ? " (la estable)" : ", fuera de la estable"}` }
       : { estado: "espera", detalle: "Leyendo producción…" });
   } else if (i.tipo === "simulada") {
     Object.assign(app, { estado: "neutro", detalle: "Sin cambios: la alarma se forzó a mano" });
   } else if (i.version_rota) {
-    Object.assign(app, { estado: "mal", ms: i.despliegue_ms, detalle: `Mal despliegue: live → v${i.version_rota}` +
+    Object.assign(app, { estado: "mal", ms: i.despliegue_ms,
+      detalle: `${i.tipo === "codigo" ? "Bug de código" : "Mal despliegue"}: live → v${i.version_rota}` +
       (i.peticiones ? ` · ${i.errores} de ${i.peticiones} peticiones fallan` : "") });
   } else {
     Object.assign(app, { estado: "neutro", detalle: "La alarma la disparó otra terminal o pestaña" });
@@ -632,7 +650,8 @@ function pintarRecorrido() {
   tipo.className = "etiqueta";
   tipo.textContent = "";
   if (incidente) {
-    const etiquetas = { fallo: "Mal despliegue", simulada: "Falsa alarma simulada", detectado: "Detectado por la alarma" };
+    const etiquetas = { fallo: "Mal despliegue: configuración", codigo: "Mal despliegue: código",
+      simulada: "Falsa alarma simulada", detectado: "Detectado por la alarma" };
     tipo.textContent = etiquetas[incidente.tipo] || "";
     tipo.classList.add(incidente.tipo === "simulada" ? "simulada" : "fallo");
   }
@@ -678,7 +697,7 @@ function siguientePaso() {
     if (v && p.estable && v !== p.estable) return `No apruebes: propone la v${v} y la estable es la v${p.estable}. Pulsa Restaurar.`;
     return `Propone la v${v || "?"}, que es la estable: revisa la causa y pulsa Aprobar.`;
   }
-  if (i && i.aprobacion && !i.restaurado_ms) return "Rollback hecho. Pulsa Restaurar para dejar también la variable limpia.";
+  if (i && i.aprobacion && !i.restaurado_ms) return "Rollback hecho. Pulsa Restaurar para dejar también $LATEST como la estable.";
   if (i && d && esFalsaAlarma(d) && i.tipo === "simulada") {
     return a.estado === "ALARM" ? "SEV4 y nada que aprobar: no se inventó un incidente. La alarma vuelve sola a OK."
       : "SEV4 y nada que aprobar: no se inventó un incidente. Listo para repetir.";
@@ -686,7 +705,7 @@ function siguientePaso() {
   if (a.estado === "ALARM") return "Espera a que la alarma vuelva sola a OK (hasta 1,5 min).";
   if (p.salud !== "sana") return "Producción no está en la estable: pulsa Restaurar.";
   if (i && i.aprobacion) return "Todo sano. Prueba Simular falsa alarma: ¿el N1 se da cuenta?";
-  return "Pulsa Provocar mal despliegue para empezar.";
+  return "Pulsa Provocar mal despliegue o Provocar error de código para empezar.";
 }
 
 function pintarSiguiente() {
@@ -879,12 +898,16 @@ function pintarContexto(caja) {
     el("div", { class: "ctx-logs" }, ...errores.map((linea) => {
       const m = /^(\d+x) (.*)$/.exec(String(linea));
       return el("div", { class: "ctx-linea" }, m ? el("span", { class: "veces", text: m[1] }) : null, m ? ` ${m[2]}` : String(linea));
-    }))));
+    })),
+    el("p", { class: "ctx-suave", text: "Entre corchetes, el archivo y la línea donde falló el código, si hubo traceback." }),
+    enlaceAws("Ver el log crudo de la app en CloudWatch Logs", enlaces().app_logs)));
 
   const dep = ctx.despliegue || {};
   const live = ((dep.aliases || []).find((a) => a.alias === "live") || {}).apunta_a_version;
   const estable = dep.ultima_version_buena_conocida;
   const versiones = dep.versiones_publicadas || [];
+  // El código de la estable: con él se ve si una versión cambió el código, la configuración o las dos.
+  const shaEstable = (versiones.find((v) => v.version === estable || v.marca) || {}).codigo_sha256 || "";
   if (versiones.length) {
     rejilla.append(seccion("Versiones que vio", "Lambda · ListVersionsByFunction",
       el("ul", { class: "ctx-versiones" }, ...versiones.map((v) => {
@@ -895,8 +918,11 @@ function pintarContexto(caja) {
         const numeroV = urlAws(enlaceVersion(v.version))
           ? el("a", { class: "ctx-v", href: enlaceVersion(v.version), target: "_blank", rel: "noopener noreferrer", text: `v${v.version}` })
           : el("span", { class: "ctx-v", text: `v${v.version}` });
-        return el("li", { class: host && host !== "localhost" ? "rota" : "" }, numeroV, ...etiquetas,
-          el("span", { class: "ctx-desc", text: v.descripcion || "" }), el("code", { text: host ? `DB_HOST=${host}` : "" }));
+        const sha = v.codigo_sha256 || "";
+        const otroCodigo = Boolean(sha && shaEstable && sha !== shaEstable);
+        return el("li", { class: (host && host !== "localhost") || otroCodigo ? "rota" : "" }, numeroV, ...etiquetas,
+          el("span", { class: "ctx-desc", text: v.descripcion || "" }), el("code", { text: host ? `DB_HOST=${host}` : "" }),
+          sha ? el("code", { title: "Hash del paquete de código (CodeSha256)", text: `código ${sha}${otroCodigo ? " ≠ estable" : ""}` }) : null);
       })),
       dep.aviso_version_estable ? el("p", { class: "ctx-suave", text: dep.aviso_version_estable }) : null));
   }
@@ -927,6 +953,7 @@ function pintarJson(caja) {
 
 // ── Arranque ────────────────────────────────────────────────
 $("b-provocar").addEventListener("click", () => accion("provocar"));
+$("b-codigo").addEventListener("click", () => accion("codigo"));
 $("b-simular").addEventListener("click", () => accion("simular"));
 $("b-restaurar").addEventListener("click", () => accion("restaurar"));
 for (const b of document.querySelectorAll("#pestanas .pestana")) {

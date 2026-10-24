@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Vuelve al estado sano: alias live a la version estable, $LATEST con DB_HOST=localhost y alarma en OK.
+# Vuelve al estado sano: alias live a la version estable, $LATEST con DB_HOST=localhost y con el
+# codigo de la version estable, y alarma en OK.
 set -uo pipefail
 cd "$(dirname "$0")"
 source ./_comun.sh
@@ -24,6 +25,23 @@ echo "live -> v$ESTABLE  (version estable, leida de $FUENTE)"
 aws lambda update-function-configuration --function-name "$APP" \
   --environment "Variables={DB_HOST=localhost,DB_PORT=5432}" --query LastUpdateStatus --output text >/dev/null
 aws lambda wait function-updated --function-name "$APP"
+# Un fallo de codigo (./provocar_fallo.sh codigo) deja otro paquete en $LATEST: se le devuelve el de
+# la version estable. get-function da una URL firmada del paquete; se descarga y se sube igual.
+# Mismos bytes, mismo CodeSha256, y Terraform no ve ningun cambio.
+COD_LATEST=$(aws lambda get-function-configuration --function-name "$APP" --query CodeSha256 --output text | tr -d '\r')
+COD_ESTABLE=$(aws lambda get-function-configuration --function-name "$APP" --qualifier "$ESTABLE" --query CodeSha256 --output text | tr -d '\r')
+if [ "$COD_LATEST" != "$COD_ESTABLE" ]; then
+  echo "El codigo de \$LATEST no es el de la v$ESTABLE (lo dejo un fallo de codigo): lo restauro"
+  URL=$(aws lambda get-function --function-name "$APP" --qualifier "$ESTABLE" --query Code.Location --output text | tr -d '\r')
+  ZIP="$(mktemp -d)/app-pagos-estable.zip"
+  if curl -sSf -o "$ZIP" "$URL" &&
+     aws lambda update-function-code --function-name "$APP" --zip-file "fileb://$ZIP" --query LastUpdateStatus --output text >/dev/null; then
+    aws lambda wait function-updated --function-name "$APP"
+    echo "codigo de \$LATEST = codigo de la v$ESTABLE"
+  else
+    echo "No pude restaurar el codigo de \$LATEST (arriba el detalle)."
+  fi
+fi
 R=$(aws lambda invoke --function-name "${APP}:live" --payload '{}' --cli-binary-format raw-in-base64-out \
      --query FunctionError --output text /dev/null 2>/dev/null | tr -d '\r')
 if [ "$R" = "None" ]; then echo "Prueba de humo en live: OK"; else echo "Prueba de humo en live: FALLA ($R)"; fi
@@ -45,6 +63,7 @@ if [ "$ESTADO" = "ALARM" ]; then
   echo "    aws cloudwatch describe-alarms --alarm-names $ALARMA --query 'MetricAlarms[0].[StateValue,StateReason]' --output text"
 else
   echo "  - live apunta a la version estable, responde OK y la alarma esta en $ESTADO."
-  echo "    Puedes repetir con ./provocar_fallo.sh o probar la falsa alarma con ./simular_alarma.sh"
+  echo "    Puedes repetir con ./provocar_fallo.sh (o ./provocar_fallo.sh codigo) o probar la falsa"
+  echo "    alarma con ./simular_alarma.sh"
   echo "  - Al terminar, borra todo: ./destroy.sh  (./destroy-cloudformation.sh si desplegaste con CloudFormation)"
 fi

@@ -200,5 +200,5 @@ if [ "$OK" -eq "$VERIFICACIONES" ]; then
 else
   echo "  - $((VERIFICACIONES - OK)) pagos fallaron: mira la columna de ./logs.sh o vuelve a la estable con ./restaurar.sh"
 fi
-echo "  - \$LATEST sigue con el DB_HOST malo que dejo provocar_fallo.sh: ./restaurar.sh lo deja sano"
-echo "    y espera a que la alarma vuelva a OK."
+echo "  - \$LATEST sigue con lo que dejo provocar_fallo.sh (el DB_HOST malo o el codigo con el bug):"
+echo "    ./restaurar.sh lo deja como la version estable y espera a que la alarma vuelva a OK."

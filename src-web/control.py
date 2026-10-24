@@ -10,7 +10,8 @@ consola con el PIN de la demo. Hace lo mismo que los scripts de la terminal:
   GET  /api/diagnostico   ultimo DIAGNOSTICO_JSON del N1 desde un instante  (ver_diagnostico.sh),
                           con la traza de esa invocacion (cuando lo desperto EventBridge, cuanto
                           tardaron el contexto y Bedrock) y el CONTEXTO_JSON que le mando a Claude
-  POST /api/provocar      mal despliegue real                                (provocar_fallo.sh)  PIN
+  POST /api/provocar      mal despliegue real de configuracion (DB_HOST)     (provocar_fallo.sh)  PIN
+  POST /api/codigo        mal despliegue real de codigo (un bug)             (provocar_fallo.sh codigo) PIN
   POST /api/simular       alarma forzada sin errores nuevos                  (simular_alarma.sh)  PIN
   POST /api/aprobar       el rollback que propuso el N1, si y solo si es un
                           update-alias de live en la app de pagos                                 PIN
@@ -22,11 +23,14 @@ UpdateAlias con el SDK. Cualquier otra cosa se rechaza con 400 y el motivo.
 
 import base64
 import hmac
+import io
 import json
 import os
 import re
 import time
 import traceback
+import urllib.request
+import zipfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -52,6 +56,9 @@ MODELO_BASE = os.environ.get("FOUNDATION_MODEL_ID", "anthropic.claude-sonnet-4-6
 # Los mismos valores que los scripts de la terminal.
 HOST_MALO = os.environ.get("HOST_MALO", "db-pagos.prod.internal")     # provocar_fallo.sh
 PETICIONES = int(os.environ.get("PETICIONES", "12"))                   # provocar_fallo.sh
+# provocar_fallo.sh codigo: el mismo archivo con el bug, que Terraform empaqueta junto a esta consola.
+CODIGO_CON_BUG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_pagos_con_bug.py")
+DESCRIPCION_BUG = "release viernes 6pm (comision del 1,5 %)"
 MOTIVO_SIMULADA = "Prueba manual: alarma forzada con set-alarm-state"  # simular_alarma.sh
 VERIFICACIONES = 5            # invocaciones de prueba despues de aprobar el rollback
 VENTANA_MIN = 20              # ver_diagnostico.sh: MIN=20 si no hay instante del incidente
@@ -223,19 +230,28 @@ NOMBRES = {"app": APP, "alarma": ALARMA, "regla": REGLA, "oncall": ONCALL, "topi
 # ─────────────────────────────────────────────────────────────
 # Lecturas
 # ─────────────────────────────────────────────────────────────
+def _leer_version(v):
+    c = lam.get_function_configuration(FunctionName=APP, Qualifier=v)
+    variables = (c.get("Environment") or {}).get("Variables") or {}
+    modificada = c.get("LastModified")  # "2026-10-10T19:45:56.000+0000"
+    try:
+        publicada_ms = _ms(datetime.strptime(modificada, "%Y-%m-%dT%H:%M:%S.%f%z"))
+    except (TypeError, ValueError):
+        publicada_ms = None
+    return {"version": c.get("Version", v), "descripcion": c.get("Description", ""),
+            "db_host": variables.get("DB_HOST", ""), "codigo": (c.get("CodeSha256") or "")[:12],
+            "publicada_ms": publicada_ms}
+
+
 def _version(v):
-    """Descripcion y DB_HOST de una version publicada. Una version no cambia: se cachea."""
-    def leer():
-        c = lam.get_function_configuration(FunctionName=APP, Qualifier=v)
-        variables = (c.get("Environment") or {}).get("Variables") or {}
-        modificada = c.get("LastModified")  # "2026-10-10T19:45:56.000+0000"
-        try:
-            publicada_ms = _ms(datetime.strptime(modificada, "%Y-%m-%dT%H:%M:%S.%f%z"))
-        except (TypeError, ValueError):
-            publicada_ms = None
-        return {"version": c.get("Version", v), "descripcion": c.get("Description", ""),
-                "db_host": variables.get("DB_HOST", ""), "publicada_ms": publicada_ms}
-    return _cacheado(f"version:{v}", 3600, leer)
+    """Descripcion, DB_HOST y hash del codigo de una version publicada. No cambia: se cachea."""
+    return _cacheado(f"version:{v}", 3600, lambda: _leer_version(v))
+
+
+def _que_cambia(a, b):
+    """Lo que separa dos versiones: 'codigo', 'DB_HOST', las dos cosas o nada."""
+    cambia = [n for n, k in (("codigo", "codigo"), ("DB_HOST", "db_host")) if a.get(k) != b.get(k)]
+    return " y ".join(cambia)
 
 
 def _live():
@@ -282,13 +298,14 @@ def estado():
     def leer():
         live = _live()
         v_live = _version(live)
-        v_estable = _version(ESTABLE) if ESTABLE else {"descripcion": "", "db_host": ""}
+        v_estable = _version(ESTABLE) if ESTABLE else {"descripcion": "", "db_host": "", "codigo": ""}
+        cambio = "" if live == ESTABLE else _que_cambia(v_live, v_estable)
         if live == ESTABLE:
             salud = "sana"
-        elif v_live["db_host"] != v_estable["db_host"]:
-            salud = "rota"
+        elif cambio:
+            salud = "rota"         # otro codigo u otra configuracion que la version estable
         else:
-            salud = "distinta"     # otra version, con la misma configuracion que la estable
+            salud = "distinta"     # otra version, con el mismo codigo y la misma configuracion
         # El dato es por minuto y llega con 1-2 min de retraso: pedirlo en cada sondeo no aporta
         # nada. Con 30 s de cache son como mucho 2 peticiones a CloudWatch por minuto y entorno.
         puntos = _cacheado("metricas", 30, _errores_por_minuto)
@@ -297,8 +314,9 @@ def estado():
                 "funcion": APP, "salud": salud,
                 "live": live, "live_descripcion": v_live["descripcion"],
                 "live_db_host": v_live["db_host"], "live_publicada_ms": v_live["publicada_ms"],
+                "live_codigo": v_live["codigo"], "cambio": cambio,
                 "estable": ESTABLE, "estable_descripcion": v_estable["descripcion"],
-                "estable_db_host": v_estable["db_host"],
+                "estable_db_host": v_estable["db_host"], "estable_codigo": v_estable["codigo"],
             },
             "alarma": _alarma(),
             "metricas": puntos,
@@ -445,8 +463,12 @@ def _cambiar_db_host(host):
     lam.get_waiter("function_updated").wait(FunctionName=APP, WaiterConfig={"Delay": 1, "MaxAttempts": 25})
 
 
-def provocar():
-    """provocar_fallo.sh: version nueva con un DB_HOST que no existe, live a esa version y trafico."""
+def _exigir_base_sana():
+    """
+    Antes de romper: la alarma fuera de ALARM, live en la estable y $LATEST con el codigo y el
+    DB_HOST de la estable. Si un fallo anterior quedo sin restaurar, la version nueva arrastraria
+    los dos problemas y el diagnostico ya no seria el de este fallo. Devuelve la version en live.
+    """
     if _alarma()["estado"] == "ALARM":
         raise ErrorApi(409, "La alarma ya esta en ALARM. Espera a que vuelva a OK: EventBridge solo "
                             "avisa cuando la alarma cambia de estado y no llegaria un diagnostico nuevo.")
@@ -454,19 +476,58 @@ def provocar():
     if ESTABLE and antes != ESTABLE:
         raise ErrorApi(409, f"Produccion ya no esta en la version estable (live apunta a v{antes}). "
                             "Aprueba el rollback o pulsa Restaurar antes de romperla otra vez.")
-    desde = _ahora_ms()     # como .ultimo-incidente: el diagnostico se busca desde aqui
-    _cambiar_db_host(HOST_MALO)
-    nueva = lam.publish_version(FunctionName=APP,
-                                Description=f"release viernes 6pm (DB_HOST={HOST_MALO})")["Version"]
+    if ESTABLE:
+        cambia = _que_cambia(_leer_version("$LATEST"), _version(ESTABLE))
+        if cambia:
+            raise ErrorApi(409, f"$LATEST no esta como la version estable (cambia: {cambia}): un fallo "
+                                "anterior quedo sin restaurar. Pulsa Restaurar.")
+    return antes
+
+
+def _desplegar_y_probar(antes, desde, nueva, extra):
+    """live a la version nueva y trafico de clientes: lo comun a los dos malos despliegues."""
     lam.update_alias(FunctionName=APP, Name="live", FunctionVersion=nueva)
     movido = time.monotonic()
     despliegue = _ahora_ms()
     trafico = _trafico(PETICIONES, movido)
     _olvidar_estado()
     return {"desde": desde, "despliegue_ms": despliegue, "version_antes": antes, "version_nueva": nueva,
-            "db_host": HOST_MALO, "peticiones": PETICIONES, **trafico,
+            "peticiones": PETICIONES, **extra, **trafico,
             "siguiente": "La alarma tarda de 1 a 3 min en pasar a ALARM (la metrica de Lambda es por "
                          "minuto). El diagnostico aparece de 10 a 30 s despues."}
+
+
+def provocar():
+    """provocar_fallo.sh: version nueva con un DB_HOST que no existe, live a esa version y trafico."""
+    antes = _exigir_base_sana()
+    desde = _ahora_ms()     # como .ultimo-incidente: el diagnostico se busca desde aqui
+    _cambiar_db_host(HOST_MALO)
+    nueva = lam.publish_version(FunctionName=APP,
+                                Description=f"release viernes 6pm (DB_HOST={HOST_MALO})")["Version"]
+    return _desplegar_y_probar(antes, desde, nueva, {"tipo": "configuracion", "db_host": HOST_MALO})
+
+
+def _paquete(codigo):
+    """Un .zip con el codigo como index.py y permisos de lectura (0644), como lo empaqueta Terraform."""
+    buf = io.BytesIO()
+    info = zipfile.ZipInfo("index.py", date_time=(2026, 10, 24, 0, 0, 0))
+    info.external_attr = 0o644 << 16
+    info.compress_type = zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(info, codigo)
+    return buf.getvalue()
+
+
+def provocar_codigo():
+    """provocar_fallo.sh codigo: version nueva con un bug (fallos/app_pagos_con_bug.py) y trafico."""
+    antes = _exigir_base_sana()
+    with open(CODIGO_CON_BUG, "rb") as f:
+        paquete = _paquete(f.read())
+    desde = _ahora_ms()
+    lam.update_function_code(FunctionName=APP, ZipFile=paquete)
+    lam.get_waiter("function_updated").wait(FunctionName=APP, WaiterConfig={"Delay": 1, "MaxAttempts": 25})
+    nueva = lam.publish_version(FunctionName=APP, Description=DESCRIPCION_BUG)["Version"]
+    return _desplegar_y_probar(antes, desde, nueva, {"tipo": "codigo", "descripcion": DESCRIPCION_BUG})
 
 
 def simular():
@@ -545,17 +606,35 @@ def aprobar(cuerpo):
             "db_host": _version(version)["db_host"], "invocaciones": VERIFICACIONES, **trafico}
 
 
+def _restaurar_codigo():
+    """
+    Si un fallo de codigo dejo otro paquete en $LATEST, le devuelve el de la version estable:
+    GetFunction da una URL firmada del paquete, se descarga y se sube igual. Mismos bytes, mismo
+    CodeSha256, y Terraform no ve ningun cambio. Devuelve True si tuvo que restaurarlo.
+    """
+    if _leer_version("$LATEST")["codigo"] == _version(ESTABLE)["codigo"]:
+        return False
+    url = lam.get_function(FunctionName=APP, Qualifier=ESTABLE)["Code"]["Location"]
+    with urllib.request.urlopen(url, timeout=10) as r:     # noqa: S310 — URL firmada de Lambda
+        paquete = r.read()
+    lam.update_function_code(FunctionName=APP, ZipFile=paquete)
+    lam.get_waiter("function_updated").wait(FunctionName=APP, WaiterConfig={"Delay": 1, "MaxAttempts": 25})
+    return True
+
+
 def restaurar():
-    """restaurar.sh: live a la version estable, DB_HOST=localhost en $LATEST y prueba de humo."""
+    """restaurar.sh: live a la estable, $LATEST con el DB_HOST y el codigo de la estable, y prueba de humo."""
     if not ESTABLE:
         raise ErrorApi(500, "La consola no conoce la version estable (variable STABLE_VERSION).")
     antes = _live()
     lam.update_alias(FunctionName=APP, Name="live", FunctionVersion=ESTABLE)
     movido = time.monotonic()
     _cambiar_db_host("localhost")
+    codigo = _restaurar_codigo()
     humo = _trafico(1, movido)
     _olvidar_estado()
     return {"version_antes": antes, "live": ESTABLE, "humo": "OK" if humo["ok"] else "FALLA",
+            "codigo_restaurado": codigo,
             "atendidas_por": humo["atendidas_por"], "alarma": _alarma()["estado"],
             "siguiente": "La alarma no se fuerza a OK: vuelve sola en cuanto evalua un minuto sin "
                          "errores (normalmente de 1 a 3 min)."}
@@ -581,6 +660,7 @@ RUTAS = {
     ("GET", "/api/estado"): (False, lambda ev: estado()),
     ("GET", "/api/diagnostico"): (False, lambda ev: diagnostico(_desde(ev))),
     ("POST", "/api/provocar"): (True, lambda ev: provocar()),
+    ("POST", "/api/codigo"): (True, lambda ev: provocar_codigo()),
     ("POST", "/api/simular"): (True, lambda ev: simular()),
     ("POST", "/api/aprobar"): (True, lambda ev: aprobar(_cuerpo(ev))),
     ("POST", "/api/restaurar"): (True, lambda ev: restaurar()),

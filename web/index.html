@@ -62,6 +62,7 @@
           </div>
         </div>
         <p class="dbhost">DB_HOST de live: <code id="prod-dbhost">–</code></p>
+        <p class="dbhost" title="Hash del paquete de código (CodeSha256): si cambia, cambió el código">Código de live: <code id="prod-codigo">–</code></p>
         <div class="grafico" id="prod-grafico" aria-label="Invocaciones y errores por minuto"></div>
         <div class="ejes" id="prod-ejes"></div>
         <p class="nota" id="prod-nota">Invocaciones por minuto, últimos 10 min. La métrica llega con 1 o 2 min de retraso.</p>
@@ -91,7 +92,11 @@
         <div class="acciones">
           <div class="accion">
             <button type="button" class="boton rojo" id="b-provocar">Provocar mal despliegue</button>
-            <p class="ayuda">Publica una versión rota, mueve live y manda 12 peticiones reales.</p>
+            <p class="ayuda">Error de configuración: una versión con un DB_HOST que no existe, live a esa versión y 12 peticiones reales.</p>
+          </div>
+          <div class="accion">
+            <button type="button" class="boton naranja" id="b-codigo">Provocar error de código</button>
+            <p class="ayuda">Un bug: una versión cuyo código lee un campo que los clientes no mandan. Misma configuración, 12 peticiones reales.</p>
           </div>
           <div class="accion">
             <button type="button" class="boton morado" id="b-simular">Simular falsa alarma</button>
@@ -99,7 +104,7 @@
           </div>
           <div class="accion">
             <button type="button" class="boton azul" id="b-restaurar">Restaurar</button>
-            <p class="ayuda">live a la versión estable y DB_HOST=localhost.</p>
+            <p class="ayuda">live a la versión estable, DB_HOST=localhost y el código de la estable.</p>
           </div>
         </div>
         <p class="resultado" id="resultado" role="status" aria-live="polite"></p>

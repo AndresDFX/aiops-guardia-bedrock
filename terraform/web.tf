@@ -280,11 +280,15 @@ resource "aws_iam_role_policy" "web_manos" {
       {
         Sid    = "AppDePagosVersionesYAlias"
         Effect = "Allow"
+        # UpdateFunctionCode y GetFunction, para el fallo de codigo: el boton sube el paquete con el
+        # bug, y Restaurar descarga el de la version estable (GetFunction da su URL) y lo devuelve.
         Action = [
           "lambda:GetAlias",
           "lambda:UpdateAlias",
+          "lambda:GetFunction",
           "lambda:GetFunctionConfiguration",
           "lambda:UpdateFunctionConfiguration",
+          "lambda:UpdateFunctionCode",
           "lambda:PublishVersion",
           "lambda:ListVersionsByFunction",
           "lambda:InvokeFunction",
@@ -323,12 +327,22 @@ resource "aws_cloudwatch_log_group" "web" {
   retention_in_days = 1
 }
 
+# La consola y, a su lado, el codigo con el bug que sube el boton "Provocar error de codigo" (el
+# mismo archivo que usa ./provocar_fallo.sh codigo).
 data "archive_file" "web" {
   count            = var.web_enabled ? 1 : 0
   type             = "zip"
-  source_file      = "${path.module}/../src-web/control.py"
   output_path      = "${path.module}/.build/web.zip"
   output_file_mode = "0644"
+
+  source {
+    filename = "control.py"
+    content  = file("${path.module}/../src-web/control.py")
+  }
+  source {
+    filename = "app_pagos_con_bug.py"
+    content  = file("${path.module}/../fallos/app_pagos_con_bug.py")
+  }
 }
 
 resource "aws_lambda_function" "web" {

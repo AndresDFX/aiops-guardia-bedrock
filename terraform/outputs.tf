@@ -69,7 +69,8 @@ output "siguientes_pasos" {
     QUE MIRAR AHORA (desde la carpeta del repo):
       1. En una segunda columna de CloudShell (Actions -> Tabs layout -> Split into columns),
          deja corriendo la terminal del ingeniero de guardia: ./logs.sh
-      2. Rompe produccion con un mal despliegue real: ./provocar_fallo.sh
+      2. Rompe produccion con un mal despliegue real: ./provocar_fallo.sh  (configuracion)
+         o con un bug de codigo: ./provocar_fallo.sh codigo
          La alarma suena en 1-2 min y el diagnostico aparece en la columna de ./logs.sh.
       3. Leelo con ./ver_diagnostico.sh y, si estas de acuerdo, aprueba el rollback: ./aprobar.sh
     ${local.paso_web}

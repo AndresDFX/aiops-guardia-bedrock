@@ -16,6 +16,7 @@ git clone https://github.com/AndresDFX/aiops-guardia-bedrock.git && cd aiops-gua
 ./deploy.sh            # crea todo: comprueba el modelo, instala Terraform si falta, init y apply
 ./logs.sh              # en una segunda columna: la terminal del ingeniero on-call
 ./provocar_fallo.sh    # un mal despliegue real; la alarma suena en 1-2 min
+                       # (./provocar_fallo.sh codigo: el mismo incidente con un bug de código)
 ./ver_diagnostico.sh   # severidad, causa raíz y el comando que propone el N1
 ./aprobar.sh           # valida ese comando, te pide confirmación y hace el rollback
 ./restaurar.sh         # deja todo sano y espera a que la alarma vuelva a OK
@@ -30,16 +31,17 @@ derecha, `./logs.sh`; en la de la izquierda, el resto.
 |---|---|
 | `deploy.sh` | Comprueba la cuenta, la región, el perfil del modelo, el acuerdo de Marketplace y la cuota; instala Terraform si falta; `init` y `apply`. Imprime la URL de la consola web, el PIN y la versión estable. Se puede repetir: si ya está desplegada, no cambia nada |
 | `logs.sh` | `aws logs tail` del N1 en vivo, sin las dos líneas JSON largas |
-| `provocar_fallo.sh` | Mal despliegue real: `DB_HOST` inválido, versión nueva, alias `live` y 12 peticiones |
+| `provocar_fallo.sh` | Mal despliegue real: `DB_HOST` inválido, versión nueva, alias `live` y 12 peticiones. Con `codigo`, sube `fallos/app_pagos_con_bug.py` en lugar de cambiar la variable. Se niega si un fallo anterior quedó sin restaurar |
 | `ver_diagnostico.sh` | Muestra el último diagnóstico de este incidente y lo guarda en `salidas/` |
 | `aprobar.sh` | Valida el `comando_remediacion` con la misma regla que el botón Aprobar de la web y, si lo confirmas, ejecuta **su propio** `update-alias` (nunca el texto del modelo); luego 5 pagos de prueba |
-| `restaurar.sh` | `live` a la versión estable, `DB_HOST=localhost` y espera a que la alarma vuelva sola a OK |
+| `restaurar.sh` | `live` a la versión estable, `DB_HOST=localhost` y, si el código cambió, el de la estable (lo descarga de esa versión y lo vuelve a subir: mismo `CodeSha256`); espera a que la alarma vuelva sola a OK |
 | `simular_alarma.sh` | Fuerza la alarma sin errores nuevos. No sirve de plan B con producción rota: el modelo la trata como falsa alarma |
 | `destroy.sh` | Borra todo con Terraform, aunque CloudShell se haya reiniciado, y consulta la cuenta para comprobar que no quedó nada |
 | `deploy-cloudformation.sh` · `destroy-cloudformation.sh` | La ruta alternativa en CloudFormation (sin consola web) |
 | `_comun.sh` | Nombres y funciones que comparten los scripts |
 | `terraform/`, `template.yaml` | La infraestructura: app de demo + alias `live`, alarma, regla, Lambda on-call, IAM con least privilege, SNS y, en `web.tf`, la consola web |
-| `lambda_function.py` | El N1: recoge contexto, llama a Bedrock con el `SYSTEM_PROMPT`, valida el JSON y publica |
+| `lambda_function.py` | El N1: recoge contexto, llama a Bedrock con el `SYSTEM_PROMPT`, valida el JSON y publica. De cada traceback deja el último marco del código propio (archivo, línea y código) y de cada versión, el hash de su código |
+| `fallos/app_pagos_con_bug.py` | El bug del segundo fallo: la app de pagos con una comisión que lee `event["monto"]`, un campo que los pagos no traen (`KeyError` en la línea 12) |
 | `web/` y `src-web/control.py` | La consola web: la página y la Lambda de control que atiende sus botones |
 
 ## Lo que comprueba deploy.sh antes de crear nada
@@ -90,7 +92,8 @@ Si algo falla, no despliega y dice qué hacer:
   `terraform_data`), y el N1 la incluye siempre en su contexto. Sin eso, tras varios despliegues rotos
   llegó a proponer volver a una versión sana que no era la estable.
 - Después de aprobar el rollback, `terraform plan` muestra cambios: `provocar_fallo.sh` dejó el
-  `DB_HOST` malo en `$LATEST`. Después de `./restaurar.sh` vuelve a decir "No changes".
+  `DB_HOST` malo (o el código con el bug) en `$LATEST`. Después de `./restaurar.sh` vuelve a decir
+  "No changes".
 
 ## La consola web
 
@@ -101,11 +104,13 @@ córrelo otra vez: no cambia nada). Lo que muestra:
 
 - **Recorrido del incidente en AWS:** los siete pasos por los que pasa el incidente (app de pagos,
   alarma, regla de EventBridge, el N1, Bedrock, el diagnóstico en Logs y SNS, y tú), que se encienden en
-  orden con su hora. Cada paso tiene enlaces ↗ a la consola de AWS: la alarma, la regla, las versiones de
-  la app, CloudTrail, el modelo y los logs de **esa** invocación del N1. Solo llevan la región y los
+  orden con su hora. Cada paso tiene enlaces ↗ a la consola de AWS: los logs, las versiones y CloudTrail
+  de la app (los tres lugares donde se ve un error), la alarma, la regla, el modelo y los logs de **esa**
+  invocación del N1. Solo llevan la región y los
   nombres, nunca el ID de cuenta, y abren la consola de quien tenga la sesión iniciada en la cuenta.
 - **Siguiente paso:** qué hacer ahora (esperar la alarma, comparar la versión, aprobar, restaurar…).
-- Producción, la alarma y las acciones: Provocar mal despliegue, Simular falsa alarma y Restaurar.
+- Producción (con el `DB_HOST` y el hash del código de `live`), la alarma y las acciones: Provocar mal
+  despliegue, Provocar error de código, Simular falsa alarma y Restaurar.
 - El diagnóstico, en tres pestañas: **Diagnóstico** (con Aprobar y ejecutar rollback), **Contexto que
   vio el N1** (el `CONTEXTO_JSON` que la Lambda le mandó a Claude: métricas por minuto, errores
   agrupados, versiones con live y la estable, cambios en CloudTrail) y **JSON** (los dos, tal cual).
@@ -118,8 +123,9 @@ permisos.
 - CloudFront tarda en publicar el dominio: la página respondió entre 1 y 2,5 min después del `apply`.
   Si no abre, espera y recarga.
 - Mirarla no pide nada. Las acciones piden el PIN (8 cifras, lo genera Terraform); sin él, 401.
-- El N1 no gana permisos. El rol de `guardia-web` solo mueve el alias y cambia la configuración de la
-  app de pagos, fuerza su alarma y lee los logs del N1. Aprobar no ejecuta texto: valida que el comando
+- El N1 no gana permisos. El rol de `guardia-web` solo mueve el alias, cambia la configuración y el
+  código de la app de pagos (el segundo botón y Restaurar), fuerza su alarma y lee los logs del N1.
+  Aprobar no ejecuta texto: valida que el comando
   sea un `update-alias` de `live` a una versión que existe. `./aprobar.sh` usa esa misma función,
   leída de `src-web/control.py`.
 - Costo: menos de USD 0,01 por hora con la página abierta (CloudFront, HTTP API y Lambda cobran por
@@ -173,5 +179,21 @@ Con la consola del recorrido y los enlaces, el 18-oct-2026, en el mismo contened
   alarma dio SEV4 sin comando en unos 10 s.
 - Los 13 enlaces a la consola de AWS abrieron el recurso correcto (sesión federada de solo lectura).
 - `./destroy.sh` en un contenedor nuevo: 6 min 00 s, y la cuenta quedó limpia.
+
+Con el error de código, el 24-oct-2026, en el mismo contenedor y con otro prefijo
+(`PROJECT=guardiacod`):
+
+- Las seis corridas (dos por la terminal y cuatro por la consola) dieron la causa en `index.py:12` y el
+  rollback a la versión estable, con la nota de corregir el bug antes de volver a publicar. Cinco
+  salieron SEV1 y una SEV2: la que vino justo después de un mal despliegue de configuración, con los
+  errores de los dos en la ventana de 15 min. Bedrock tardó de 7,0 a 9,8 s, y una vez 18 s, con 1 911
+  a 2 935 tokens de entrada y 729 a 900 de salida (≈ USD 0,02).
+- La alarma saltó entre 27 s y 1 min después del despliegue con el bug. En tres corridas, CloudTrail
+  todavía no mostraba el `UpdateFunctionCode` cuando el N1 juntó el contexto: el cambio lo delató el
+  hash del código (otro hash, las mismas variables).
+- `./restaurar.sh` y el botón Restaurar devolvieron el código de la estable (mismo `CodeSha256`) y
+  `terraform plan` dijo "No changes". La falsa alarma, con los errores del bug todavía en la ventana,
+  siguió en SEV4 sin comando, y el mal despliegue de configuración siguió dando SEV1 con la estable.
+- La ruta de CloudFormation no se repitió con el error de código; los scripts son los mismos.
 
 Paso a paso para hacerlo en tu cuenta: la guía del participante, https://docs.google.com/document/d/1IBYyPOUXtjLfahEFQsnwzqiVEjUWGEfe/edit.

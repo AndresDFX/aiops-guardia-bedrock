@@ -7,8 +7,10 @@ Flujo (event-driven, nadie hace polling):
   3. Recogemos CONTEXTO, como lo haria un humano a las 3 a. m. pero en segundos:
        - la alarma (motivo, umbral, metrica),
        - la serie de la metrica de los ultimos 30 min,
-       - las ultimas lineas de error de los logs del servicio,
-       - que version del servicio esta en produccion y que cambio respecto a la anterior,
+       - las ultimas lineas de error de los logs del servicio, agrupadas, con el archivo y la
+         linea del codigo donde fallo cuando hay traceback,
+       - que version del servicio esta en produccion y que cambio respecto a la anterior
+         (su codigo, por hash, y sus variables),
        - cual es la ultima version buena conocida, que le pasa el despliegue (STABLE_VERSIONS),
        - quien toco el recurso recientemente (CloudTrail Event history).
   4. Se lo damos a Claude Sonnet 4.6 (Bedrock, Converse API) con un SYSTEM_PROMPT de SRE
@@ -127,6 +129,9 @@ SEVERIDADES = {"SEV1", "SEV2", "SEV3", "SEV4"}
 CONFIANZAS = {"ALTA", "MEDIA", "BAJA"}
 PALABRAS_PELIGROSAS = re.compile(r"\b(delete|terminate|remove|rm|purge|deregister|detach)\b", re.I)
 SECRETO = re.compile(r"(pass|secret|token|key|credential|pwd)", re.I)
+# Un marco de un traceback de Python: archivo, linea y funcion. El runtime de Lambda indenta con
+# espacios duros (\xa0) y separa las lineas con \n; splitlines() y strip() los manejan.
+MARCO = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
 
 
 def _ahora():
@@ -193,10 +198,32 @@ def serie_metricas(namespace, dimensiones, nombres, minutos=VENTANA_MIN):
     return salida
 
 
+def donde_fallo(mensaje):
+    """
+    En un traceback, el ultimo marco del codigo de la funcion (/var/task/...) dice DONDE fallo:
+    archivo, linea, funcion y la linea de codigo. La primera linea del error dice QUE fallo; el
+    marco dice en que parte del codigo, y eso separa un bug de un problema de configuracion.
+    Si el error nace en una libreria (socket.py), el marco propio es el que la llamo.
+    """
+    marcos = list(MARCO.finditer(mensaje))
+    if not marcos:
+        return ""
+    propios = [m for m in marcos if m.group(1).startswith("/var/task/")]
+    m = (propios or marcos)[-1]
+    archivo, numero, funcion = m.groups()
+    siguiente = mensaje[m.end():].splitlines()[1:2]
+    codigo = siguiente[0].strip() if siguiente else ""
+    if codigo.startswith(("File ", "^", "~")):
+        codigo = ""
+    donde = f"{archivo.rsplit('/', 1)[-1]}:{numero} en {funcion}"
+    return f"{donde}: {codigo}" if codigo else donde
+
+
 def errores_recientes(log_group, minutos=15, maximo=8):
     """
     Errores del servicio, AGRUPADOS: 12 tracebacks identicos son 1 hecho repetido 12 veces.
-    Mandarlos tal cual gasta tokens y no le dice nada nuevo al modelo.
+    Mandarlos tal cual gasta tokens y no le dice nada nuevo al modelo. De cada traceback queda
+    la primera linea (que fallo) y el marco del codigo propio (donde fallo).
     """
     try:
         resp = logs.filter_log_events(
@@ -209,9 +236,14 @@ def errores_recientes(log_group, minutos=15, maximo=8):
         return ["(el log group no existe todavia)"]
     grupos = {}
     for e in resp.get("events", []):
-        # Primera linea del mensaje, sin el RequestId (cambia en cada invocacion).
-        linea = e["message"].strip().splitlines()[0]
-        linea = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<req>", linea)[:300]
+        # Primera linea del mensaje, sin el RequestId (cambia en cada invocacion), y donde fallo.
+        mensaje = e["message"].strip()
+        linea = mensaje.splitlines()[0]
+        linea = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<req>", linea)
+        donde = donde_fallo(mensaje)
+        if donde:
+            linea = f"{linea} [{donde}]"
+        linea = linea[:300]
         t = datetime.fromtimestamp(e["timestamp"] / 1000, timezone.utc).strftime("%H:%M:%S")
         g = grupos.setdefault(linea, {"veces": 0, "primera": t, "ultima": t})
         g["veces"] += 1
@@ -231,10 +263,13 @@ def contexto_lambda(funcion):
     """Que esta corriendo en produccion y que cambio. La mitad de los incidentes es un cambio."""
     ctx = {"funcion": funcion}
     cfg = lambda_api.get_function_configuration(FunctionName=funcion)
+    # codigo_sha256 (el hash del paquete, recortado) dice si dos versiones tienen el mismo codigo:
+    # sin el, un despliegue que solo cambia codigo se ve identico a la version sana.
     ctx["latest"] = {
         "ultima_modificacion": cfg.get("LastModified"),
         "runtime": cfg.get("Runtime"), "timeout_s": cfg.get("Timeout"),
-        "memoria_mb": cfg.get("MemorySize"), "variables": _env_sin_secretos(cfg),
+        "memoria_mb": cfg.get("MemorySize"), "codigo_sha256": (cfg.get("CodeSha256") or "")[:12],
+        "variables": _env_sin_secretos(cfg),
     }
     aliases = lambda_api.list_aliases(FunctionName=funcion).get("Aliases", [])
     ctx["aliases"] = [
@@ -268,7 +303,7 @@ def contexto_lambda(funcion):
             item["marca"] = MARCA_ESTABLE
         item.update({
             "publicada": v.get("LastModified"), "descripcion": v.get("Description", ""),
-            "variables": _env_sin_secretos(v),
+            "codigo_sha256": (v.get("CodeSha256") or "")[:12], "variables": _env_sin_secretos(v),
         })
         versiones.append(item)
     ctx["versiones_publicadas"] = versiones
